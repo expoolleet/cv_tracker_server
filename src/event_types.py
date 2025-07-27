@@ -1,0 +1,8 @@
+UPDATE_TRACKING = "update_tracking"
+STOP_TRACKING = "stop_tracking"
+START_STREAM_FOR_CLIENT = "start_stream_for_client"
+STOP_STREAM_FOR_CLIENT = "stop_stream_for_client"
+SEND_CFS = "send_cfs"
+REQUEST_TRACKING = "request_tracking"
+SHOW_CAMERA_PREVIEW = "show_camera_preview"
+STOP_CAMERA_PREVIEW = "stop_camera_preview"
