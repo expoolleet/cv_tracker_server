@@ -1,2 +1,2 @@
 # tracking_server
-Tracking server for Raspberry PI
+Server with tracking (CV) capabilities for Raspberry PI
