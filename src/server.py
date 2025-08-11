@@ -6,7 +6,17 @@ import netifaces
 import asyncio
 
 from src.event import post_event
-from src.event_types import UPDATE_TRACKING, STOP_TRACKING, START_STREAM_FOR_CLIENT, STOP_STREAM_FOR_CLIENT, SEND_CFS, SHOW_CAMERA_PREVIEW, STOP_CAMERA_PREVIEW
+from src.event_types import (
+    UPDATE_TRACKING, 
+    STOP_TRACKING, 
+    START_STREAM_FOR_CLIENT, 
+    STOP_STREAM_FOR_CLIENT, 
+    SEND_CFS, 
+    SHOW_CAMERA_PREVIEW, 
+    STOP_CAMERA_PREVIEW, 
+    TOGGLE_ROI, 
+    TOGGLE_CROSSHAIR, 
+    CHANGE_FRAME_BORDERS )
 from src.command import Command
 
 SOCKET_RECEIVE_BUFFER = 1024
@@ -47,9 +57,17 @@ class Server:
                 data = conn.recv(SOCKET_RECEIVE_BUFFER)
                 if not data:
                     break
-                try:    
-                    message = json.loads(data.decode('utf-8'))
-                    self.handle_message(message, addr)
+                try:
+                    messages = []
+                    if b"\n" in data:
+                        while b"\n" in data:
+                            line, data = data.split(b"\n", 1)
+                            message = json.loads(line.decode("utf-8"))
+                            messages.append(message)
+                    else:
+                        messages.append(json.loads(data.decode("utf-8")))
+                    for message in messages:
+                        self.handle_message(message, addr)
                 except json.JSONDecodeError:
                     print(f"Received non-JSON data: {data.decode('utf-8').strip()}")
         except Exception as e:
@@ -87,6 +105,12 @@ class Server:
                        })
         elif message["command"] == Command.STOP_TRANSMISSION:
             post_event(STOP_CAMERA_PREVIEW, client_addr[0])
+        elif message["command"] == Command.TOGGLE_ROI:
+            post_event(TOGGLE_ROI, message["data"])
+        elif message["command"] == Command.TOGGLE_CROSSHAIR:
+            post_event(TOGGLE_CROSSHAIR, message["data"])
+        elif message["command"] == Command.CHANGE_FRAME_BORDERS:
+            post_event(CHANGE_FRAME_BORDERS, message["data"])
         elif message["command"] == Command.REBOOT_SERVER:
             self.reboot()
         else:

@@ -2,13 +2,24 @@ import os
 import cv2
 import time
 import threading
-import subprocess
 import numpy as np
 import struct
+import queue
 import multiprocessing as mp
 
 from src.event import subscribe
-from src.event_types import UPDATE_TRACKING, STOP_TRACKING, START_STREAM_FOR_CLIENT, STOP_STREAM_FOR_CLIENT, SEND_CFS, REQUEST_TRACKING, SHOW_CAMERA_PREVIEW, STOP_CAMERA_PREVIEW
+from src.event_types import (
+    UPDATE_TRACKING, 
+    STOP_TRACKING,
+    START_STREAM_FOR_CLIENT,
+    STOP_STREAM_FOR_CLIENT,
+    SEND_CFS,
+    REQUEST_TRACKING,
+    SHOW_CAMERA_PREVIEW,
+    STOP_CAMERA_PREVIEW,
+    TOGGLE_ROI,
+    TOGGLE_CROSSHAIR,
+    CHANGE_FRAME_BORDERS )
 from src.command import Command
 from src.zeroconf import register_zeroconf
 from src.picamera import setup_camera
@@ -17,10 +28,13 @@ from src.ffmpeg import FFmpeg, StreamProtocol
 from src.uart_transmition import serial_transmit_binary, serial_receive_loop
 from src.fps_counter import FPSCounter
 from src.screen_stream import start_ffmpeg_screen_stream, stop_ffmpeg_procces, stream_height, stream_width, stream_lock
+from src.pipeline import WrapperPipeline
+from src.ui_draw import draw_crosshair, draw_roi
 from tracker.fast_mosse_tracker import FastMosseTracker
 
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''
 os.environ['QT_QPA_PLATFORM'] = 'eglfs'
+#os.environ['OPENCV_WINDOW_BACKGROUND'] = '0' 
 
 class Tracker:
     MOSSE = "MOSSE"
@@ -30,9 +44,15 @@ net_interface = "wlan0"
 
 window_name = 'Fullscreen PiCamera2 Feed'
 camera_preview_thread = None
-is_camera_preview_running = False
 camera_preview_lock = threading.Lock()
 camera_preview_clients = {}
+frame_top_border, frame_bottom_border, frame_left_border, frame_right_border = (0, 0, 0, 0)
+message_queue = mp.Queue()
+#frame_queue = threading.Queue(maxsize=1)
+event = threading.Event() 
+
+KEEP_ASPECT_RATIO = "keep_aspect_ratio"
+FREE_ASPECT_RATIO = "free_aspect_ratio"
 
 enable_uart = False
 
@@ -48,8 +68,7 @@ max_skipped_frames = 1
 tracker_initialized = False
 
 latest_frame_lock = threading.Lock()
-latest_highres_frame = None
-latest_lowres_frame = None
+latest_frame = None
 
 camera_framerate = 60
 camera_size_main = (640, 480)
@@ -66,7 +85,11 @@ uart_lock = threading.Lock()
 stream_protocol = StreamProtocol.UDP
 server_port = 8000
 ffmpeg_port = 8001
-server = Server(net_interface, server_port) 
+server = Server(net_interface, server_port)
+
+pipeline = WrapperPipeline()
+pipeline.register_operation(draw_crosshair, draw_crosshair.__name__, default_enabled=False)
+pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=False)
 
 roi_lock = threading.Lock()
 
@@ -153,59 +176,98 @@ def stop_stream_for_client(ip):
     server.clear_client(ip)
     print(f"Stream for {ip} is stoped")
             
-                
+               
 def show_camera_preview(data):
-    global camera_preview_lock, is_camera_preview_running, camera_preview_thread, camera_preview_clients
-    with camera_preview_lock:
-         is_camera_preview_running = True
+    global camera_preview_lock, camera_preview_thread, camera_preview_clients#, is_camera_preview_running
+    event.set()
     camera_preview_clients[data["ip"]] = True
     if camera_preview_thread is not None:
         print(f"Camera preview thread is already running ({data['ip']} is initiator), skipping...")
         return
-    
+  
     frame_time_ms = int(1000 / data["frame_rate"])
-    camera_preview_thread = threading.Thread(target=_camera_preview_loop, args=(frame_time_ms,), daemon=True)
+    camera_preview_thread = threading.Thread(target=_camera_preview_loop, args=(frame_time_ms,))
     #camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(frame_time_ms,))
     print(f"Camera preview is starting by {data['ip']}")
     camera_preview_thread.start()
     
     
 def stop_camera_preview(ip):
-    global is_camera_preview_running, camera_preview_thread, camera_preview_clients
+    global camera_preview_thread, camera_preview_clients#, is_camera_preview_running
     if ip in camera_preview_clients:
         del camera_preview_clients[ip]
     if not camera_preview_clients:
-        with camera_preview_lock:
-            is_camera_preview_running = False
+        event.clear()
+        # if camera_preview_thread and camera_preview_thread.is_alive():
+        #     print("Camera preview is still alive, joining...")
+        #     camera_preview_thread.join()
+        #     camera_preview_thread = None
         print("Camera preview is stopped")
+
+def process_message_queue():
+    try:
+        message = message_queue.get_nowait()
+        if message == KEEP_ASPECT_RATIO:
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_AUTOSIZE, 0)
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_ASPECT_RATIO, 1)
+        elif message == FREE_ASPECT_RATIO:
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_AUTOSIZE, 1)
+            cv2.setWindowProperty(window_name, cv2.WND_PROP_ASPECT_RATIO, 0)
+    except queue.Empty:
+        pass
+
+def change_frame_borders(data):
+    global frame_top_border, frame_bottom_border, frame_left_border, frame_right_border
+    frame_top_border = data["top"]
+    frame_bottom_border = data["bottom"]
+    frame_left_border = data["left"]
+    frame_right_border = data["right"]
+    if data["keep_aspect_ratio"]:
+        message_queue.put(KEEP_ASPECT_RATIO)
+    else:
+        message_queue.put(FREE_ASPECT_RATIO)
+
 
 
 def _camera_preview_loop(frame_time_ms):
     try:
-        cv2.namedWindow(window_name, cv2.WINDOW_FULLSCREEN | cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_KEEPRATIO)
+        # cv2.namedWindow(window_name, cv2.WINDOW_FULLSCREEN | cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_KEEPRATIO)
+        #cv2.namedWindow(window_name, cv2.WINDOW_KEEPRATIO | cv2.WINDOW_GUI_NORMAL)
+        #cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(window_name, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         print("Camera preview loop is started")
+
         while True:
-            with camera_preview_lock:
-                 is_running = is_camera_preview_running
+            event.wait()
 
             with latest_frame_lock:
-                frame = latest_lowres_frame.copy()
+               frame = latest_frame.copy()
 
             if frame is None:
                 print("No frames available for camera preview, skipping...")
                 time.sleep(0.1)
                 continue
-                
-            if is_running:
-                cv2.imshow(window_name, cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420))
-                cv2.waitKey(frame_time_ms)
+
+            if len(pipeline.active_pipeline_steps) > 0:
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                processed_data = pipeline.process(rgb_frame, current_roi)
+                frame = processed_data[0]
             else:
-                time.sleep(0.1)
+                frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+            frame = cv2.copyMakeBorder(frame, frame_top_border, frame_bottom_border, frame_left_border, frame_right_border, None, value = 0)
+            try:
+                cv2.imshow(window_name, frame)
+                cv2.waitKey(frame_time_ms)
+            except Exception as e:
+                print("cv2.imshow error:", e)
+                break
+            process_message_queue()
     except Exception as e:
         print(f"Camera preview loop error: {e}")
     finally:
-        cv2.destroyWindow(window_name)
-    
+        cv2.destroyAllWindows()
+ 
     
 def stream(ffmpeg_hanlder, pipe, stream_size):
     try:
@@ -213,23 +275,14 @@ def stream(ffmpeg_hanlder, pipe, stream_size):
             start = time.time()
             
             with latest_frame_lock:
-                frame_low = latest_lowres_frame
-                frame_high = latest_highres_frame
+                frame = latest_frame
                 
-            if frame_low is None:
+            if frame is None:
                 continue
 
-            if stream_size == [frame_low.shape[1], int(frame_low.shape[0] / 1.5)]:
-                frame = frame_low
-            else:
-                if frame_high is None:
-                    frame = frame_low
-                    frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
-                    frame = cv2.resize(frame, stream_size, cv2.INTER_LINEAR)
-                else:
-                    frame = frame_high
-                    if (frame.shape[1], frame.shape[0]) != stream_size:
-                        frame = cv2.resize(frame, stream_size, cv2.INTER_LINEAR)
+            if stream_size != [frame.shape[1], int(frame.shape[0] / 1.5)]:
+                frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                frame = cv2.resize(frame, stream_size, cv2.INTER_LINEAR)
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YUV_I420)
        
             exit_code = pipe.poll()
@@ -240,6 +293,23 @@ def stream(ffmpeg_hanlder, pipe, stream_size):
             ffmpeg_hanlder.wait_for_frametime(start)
     except BrokenPipeError as e:
         print(f"BrokenPipeError: {e}")
+   
+   
+def toggle_roi(enabled):
+    if enabled:
+        print("Enabling ROI drawing")
+        pipeline.enable_operation(draw_roi.__name__)
+    else:
+        print("Disabling ROI drawing")
+        pipeline.disable_operation(draw_roi.__name__)
+
+def toggle_crosshair(enabled):
+    if enabled:
+        print("Enabling crosshair drawing")
+        pipeline.enable_operation(draw_crosshair.__name__)
+    else:
+        print("Disabling crosshair drawing")
+        pipeline.disable_operation(draw_crosshair.__name__)
         
         
 def request_tracking():
@@ -262,8 +332,13 @@ def get_tracker():
                                 output_sigma_factor=sigma_factor)
 
 
+def capture_frame(resolution="lores"):
+    frame = cam.capture_array(resolution)
+    return frame
+
+
 def main():
-    global latest_highres_frame, latest_lowres_frame, current_roi, tracker_initialized, uart_lock
+    global current_frame, latest_frame, current_roi, tracker_initialized, uart_lock
     
     subscribe(UPDATE_TRACKING, update_tracking)
     subscribe(STOP_TRACKING, stop_tracking)
@@ -273,6 +348,9 @@ def main():
     subscribe(REQUEST_TRACKING, request_tracking)
     subscribe(SHOW_CAMERA_PREVIEW, show_camera_preview)
     subscribe(STOP_CAMERA_PREVIEW, stop_camera_preview)
+    subscribe(TOGGLE_ROI, toggle_roi)
+    subscribe(TOGGLE_CROSSHAIR, toggle_crosshair)
+    subscribe(CHANGE_FRAME_BORDERS, change_frame_borders)
     
     register_zeroconf(server.ip, server_port, stream_protocol.name, ffmpeg_port, tracking_frame_size)
     
@@ -284,27 +362,26 @@ def main():
 
     unsuccessful_tracking_frames = 0
     max_unsuccessful_tracking_frames = 30
-    wait_frames_to_send_tracker_data = 10
-    waited_frames = 0
+    wait_in_seconds_to_send_tracker_data = 0.3
     
-    global current_frame
     print("Server is started\n")
     try:
+        start_timer_tracker_data = time.time()
         while True:
             if is_streaming_screen:
                 with stream_lock:
                     if current_frame is None:
                         current_frame = np.zeros((int(stream_height * 1.5), stream_width), dtype=np.uint8)
-                    frame_low = current_frame
+                    frame = current_frame
             else:
-                frame_low = cam.capture_array("lores")
+                frame = capture_frame()
             with roi_lock:
                 if current_roi is not None:
                     if not tracker_initialized:
                         
                         tracker = get_tracker()  
                         try:
-                            tracker.init(frame_low, current_roi)
+                            tracker.init(frame, current_roi)
                             tracker_initialized = True
                             print("Tracker reinitialized with ROI:", current_roi)
                         except Exception as e:
@@ -313,14 +390,11 @@ def main():
                             tracker_initialized = False
                     
                     if tracker_initialized:   
-                        if current_tracker != Tracker.MOSSE:
-                            frame = frame_low
-                        else:
-                            frame = cv2.cvtColor(frame_low, cv2.COLOR_YUV2GRAY_I420)
+                        if current_tracker == Tracker.MOSSE:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_YUV2GRAY_I420)
                         #fps_timer = cv2.getTickCount()
                         data = tracker.update(frame)
-                        #current_fps = cv2.getTickFrequency() / (cv2.getTickCount() - fps_timer)
-
+                        #tracker_current_fps = cv2.getTickFrequency() / (cv2.getTickCount() - fps_timer)
                         fps = fps_counter.update()
 
                         if len(data) == 3:
@@ -329,15 +403,16 @@ def main():
                             success, bbox = data
                         
                         if success:
-                            waited_frames += 1
-                            if waited_frames == wait_frames_to_send_tracker_data:
-                                waited_frames = 0
+                            current_roi = tuple(map(int, bbox))
+
+                            if time.time() - start_timer_tracker_data > wait_in_seconds_to_send_tracker_data:
+                                start_timer_tracker_data = time.time()
+                                
                                 if hasattr(tracker, "get_tracker_data"):
                                     tracker_data = tracker.get_tracker_data()
                                     tracker_data["fps"] = int(fps)
                                     server.send_command_to_clients(Command.TRACKER_DATA, tracker_data)
                                 else:
-                                    current_roi = tuple(map(int, bbox))
                                     server.send_new_roi_to_clients(current_roi)
                                 unsuccessful_tracking_frames = 0
                         else:
@@ -351,7 +426,10 @@ def main():
                                     server.send_new_roi_to_clients(ROI_ZEROS)
  
             with latest_frame_lock:
-                latest_lowres_frame = frame_low
+                latest_frame = frame
+            
+            #if not frame_queue.full():
+            #    frame_queue.put(frame)
              
             if enable_uart:   
                 packet = prepare_uart_data(uart_coefs)

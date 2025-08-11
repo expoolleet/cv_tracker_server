@@ -2,7 +2,7 @@ import numpy as np
 import pyfftw
 import cv2
 from collections import deque
-from tracker.image_preprocessing import image_preprocessing
+from tracker.image_preprocessing_module import image_preprocessing
 from tracker.synthetic_target import SyntheticTarget 
 from tracker.kalman_filter import KalmanFilter
 
@@ -191,7 +191,7 @@ class FastMosseTracker:
 
         self._smooth_current_point()
 
-        self.predicted__global_point = self.predict(self.current_global_point[0], self.current_global_point[1])
+        self.predicted_global_point = self.predict(self.current_global_point[0], self.current_global_point[1])
         self.is_tracking = True     
         return True
 

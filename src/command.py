@@ -12,3 +12,8 @@ class Command:
     UART_START_TRACKING = "t"
     START_TRANSMISSION = "start_transmission"
     STOP_TRANSMISSION = "stop_transmission"
+    CHANGE_FRAME_BORDERS = "change_frame_borders"
+    
+    ## UI Commands
+    TOGGLE_ROI = "toggle_roi"
+    TOGGLE_CROSSHAIR = "toggle_crosshair"

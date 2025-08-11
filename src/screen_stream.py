@@ -80,8 +80,9 @@ def kill_ffmpeg_procces() -> None:
  
    
 def stop_ffmpeg_procces() -> None:
-    ffmpeg_process.stdin.close()
-    ffmpeg_process.wait()
+    if ffmpeg_process:
+        ffmpeg_process.stdin.close()
+        ffmpeg_process.wait()
   
                 
 def monitor_stderr() -> None:
