@@ -25,7 +25,7 @@ from src.zeroconf import register_zeroconf
 from src.picamera import setup_camera
 from src.server import Server
 from src.ffmpeg import FFmpeg, StreamProtocol
-from src.uart_transmition import serial_transmit_binary, serial_receive_loop
+from src.uart_transmition import serial_transmit_binary, serial_receive_loop, open_serial, close_serial
 from src.fps_counter import FPSCounter
 from src.screen_stream import start_ffmpeg_screen_stream, stop_ffmpeg_procces, stream_height, stream_width, stream_lock
 from src.pipeline import WrapperPipeline
@@ -54,15 +54,18 @@ event = threading.Event()
 KEEP_ASPECT_RATIO = "keep_aspect_ratio"
 FREE_ASPECT_RATIO = "free_aspect_ratio"
 
-enable_uart = False
+enable_uart = True
+
+tracker_requested = False
 
 is_streaming_screen = False
 if is_streaming_screen:
     start_ffmpeg_screen_stream()
-
+    
 
 tracker = None
 current_roi = None
+original_roi = None
 using_kalman = False
 max_skipped_frames = 1
 tracker_initialized = False
@@ -74,8 +77,19 @@ camera_framerate = 60
 camera_size_main = (640, 480)
 camera_size_lores = (448, 360)
 
+
 tracker_size = camera_size_lores
 tracking_frame_size = camera_size_lores
+
+# Tracker default parameters
+roi_size = 64
+current_roi = (int(tracker_size[0] // 2 - roi_size // 2), int(tracker_size[1] // 2 - roi_size // 2), roi_size, roi_size)
+max_skipped_frames = 1
+using_kalman = False 
+training_images_count = 9 
+alpha_smoothing = 0.9
+max_corr = 0.3
+sigma_factor = 0.05
 
 ROI_ZEROS = (0, 0, 0, 0)
 
@@ -88,8 +102,8 @@ ffmpeg_port = 8001
 server = Server(net_interface, server_port)
 
 pipeline = WrapperPipeline()
-pipeline.register_operation(draw_crosshair, draw_crosshair.__name__, default_enabled=False)
-pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=False)
+pipeline.register_operation(draw_crosshair, draw_crosshair.__name__, default_enabled=True)
+pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=True)
 
 roi_lock = threading.Lock()
 
@@ -129,14 +143,18 @@ def set_uart_coefs(coefs):
 
 
 def update_tracking(data):
-    global tracker_initialized, current_roi, max_skipped_frames, using_kalman, training_images_count, alpha_smoothing, max_corr, sigma_factor, tracking_frame_size
+    global tracker_initialized, current_roi, max_skipped_frames, using_kalman, training_images_count, alpha_smoothing, max_corr, sigma_factor, tracking_frame_size, original_roi
     with roi_lock:       
         tracker_initialized = False
-        client_stream_size = data["stream_size"]
-        width_offset = tracking_frame_size[0] / client_stream_size[0]
-        height_offset = tracking_frame_size[1] / client_stream_size[1]
-        scaled_roi = (int(data["roi"][0] * width_offset), int(data["roi"][1] * height_offset), int(data["roi"][2] * width_offset), int(data["roi"][3] * height_offset))
-        current_roi = scaled_roi
+        if "stream_size" in data:
+            client_stream_size = data["stream_size"]
+            width_offset = tracking_frame_size[0] / client_stream_size[0]
+            height_offset = tracking_frame_size[1] / client_stream_size[1]
+            scaled_roi = (int(data["roi"][0] * width_offset), int(data["roi"][1] * height_offset), int(data["roi"][2] * width_offset), int(data["roi"][3] * height_offset))
+            current_roi = scaled_roi
+        else:
+            current_roi = data["roi"]
+        original_roi = current_roi
         using_kalman = data["kalman"]
         max_skipped_frames = int(data["skip_frames"])
         training_images_count = int(data["training_images_count"])
@@ -146,15 +164,6 @@ def update_tracking(data):
     print(f"Update tracking with ROI: {current_roi}, Kalman: {using_kalman}, Skip frames: {max_skipped_frames}, Training images count: {training_images_count}, Alpha smoothing: {alpha_smoothing}, Max corr: {max_corr}, Sigma factor: {sigma_factor}")
     
 
-def stop_tracking(from_uart=False):
-    global tracker_initialized, current_roi, server
-    if not tracker_initialized:
-        return
-    with roi_lock:
-        tracker_initialized = False
-        current_roi = None
-        server.send_command_to_clients(Command.STOP_TRACKING)
-     
         
 def start_stream_for_client(params):
     global stream_protocol, ffmpeg_port
@@ -310,16 +319,45 @@ def toggle_crosshair(enabled):
     else:
         print("Disabling crosshair drawing")
         pipeline.disable_operation(draw_crosshair.__name__)
+
+
+def stop_tracking(from_uart=False):
+    global tracker_initialized, current_roi, tracker_requested
+    if not tracker_initialized:
+        return
+    with roi_lock:
+        tracker_initialized = False
+        tracker_requested = False
+        current_roi = None
+        if not from_uart:
+            server.send_command_to_clients(Command.STOP_TRACKING)
         
         
-def request_tracking():
-    global server, tracker_initialized
+def request_tracking_client():
     if tracker_initialized:
         return
     print("Requesting tracking from UART")
     server.send_command_to_clients(Command.REQUEST_TRACKING)
-
-
+    
+    
+def request_tracking_server():
+    global tracker_initialized, tracker_requested
+    if tracker_initialized or tracker_requested:
+        return
+    tracker_requested = True
+    global current_roi, original_roi
+    print("Requesting tracking from UART")
+    with roi_lock:
+        tracker_initialized = False
+        if original_roi is not None:
+            current_roi = (tracker_size[0] // 2 - original_roi[2] // 2, tracker_size[1] // 2 - original_roi[3] // 2, original_roi[2], original_roi[3])
+            print(f"Tracking was initialized with {current_roi} roi")
+        else:
+            default_size = 64
+            current_roi = (tracker_size[0] // 2 - default_size // 2, tracker_size[1] // 2 - default_size // 2, default_size, default_size)
+            print(f"current_roi is None so tracking was initialized with default region size of {default_size}x{default_size} and roi is {current_roi}")
+    
+    
 def get_tracker():
     if current_tracker == Tracker.MOSSE:
         return cv2.legacy.TrackerMOSSE_create()
@@ -338,14 +376,14 @@ def capture_frame(resolution="lores"):
 
 
 def main():
-    global current_frame, latest_frame, current_roi, tracker_initialized, uart_lock
+    global current_frame, latest_frame, current_roi, tracker_initialized, uart_lock, tracker_requested
     
     subscribe(UPDATE_TRACKING, update_tracking)
     subscribe(STOP_TRACKING, stop_tracking)
     subscribe(START_STREAM_FOR_CLIENT, start_stream_for_client)
     subscribe(STOP_STREAM_FOR_CLIENT, stop_stream_for_client)
     subscribe(SEND_CFS, set_uart_coefs)
-    subscribe(REQUEST_TRACKING, request_tracking)
+    subscribe(REQUEST_TRACKING, request_tracking_server)
     subscribe(SHOW_CAMERA_PREVIEW, show_camera_preview)
     subscribe(STOP_CAMERA_PREVIEW, stop_camera_preview)
     subscribe(TOGGLE_ROI, toggle_roi)
@@ -357,6 +395,7 @@ def main():
     fps_counter = FPSCounter()
     
     if enable_uart:
+        open_serial()
         print("Starting UART receiving...")
         threading.Thread(target=serial_receive_loop, daemon=True).start()
 
@@ -383,6 +422,7 @@ def main():
                         try:
                             tracker.init(frame, current_roi)
                             tracker_initialized = True
+                            tracker_requested = False
                             print("Tracker reinitialized with ROI:", current_roi)
                         except Exception as e:
                             print(f"Error initializing tracker with ROI {current_roi}: {e}")
@@ -443,6 +483,8 @@ def main():
         server.close_clients_pipes()
         print('\nClosing ffmpeg proccesses if were enabled...')
         stop_ffmpeg_procces()
+        print('\nClosing serial port...')
+        close_serial()
         print('\nClosing camera preview if was enabled...')
         cv2.destroyAllWindows()
         print('\nServer closed.')
