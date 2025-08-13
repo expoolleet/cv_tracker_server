@@ -21,4 +21,5 @@ def register_zeroconf(ip, port, stream_protocol, stream_port, tracking_frame_siz
                    properties=data,
                    server=socket.gethostname()+'.local.')
     zeroconf.register_service(info)
+    print(f"Zeroconf service registered with sevice type '{service_type}' with name '{service_name}'.\n")
     return zeroconf

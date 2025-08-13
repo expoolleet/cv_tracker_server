@@ -24,7 +24,7 @@ def open_serial():
     if not ser.is_open:
         ser.open()
     else:
-        print("Serial port is already opened")
+        print("Serial port is already opened.")
          
 def close_serial():
     if ser.is_open:
@@ -45,7 +45,7 @@ def serial_receive_loop():
             ser.close()
             time.sleep(2)
             ser.open()
-            print("Serial port is reopen")    
+            print("Serial port is reopened.")    
         except UnicodeDecodeError:
             pass
             #print(f"Warning: Error when decoding data with utf-8 sent by serial: {data_bytes!r}")
@@ -63,6 +63,6 @@ ser.parity = serial.PARITY_NONE
 ser.stopbits = 1
 if not ser.is_open:
     ser.open()
-print("Serial port is opened")
+print("Serial port is opened.")
 
 

@@ -34,7 +34,6 @@ from tracker.fast_mosse_tracker import FastMosseTracker
 
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''
 os.environ['QT_QPA_PLATFORM'] = 'eglfs'
-#os.environ['OPENCV_WINDOW_BACKGROUND'] = '0' 
 
 class Tracker:
     MOSSE = "MOSSE"
@@ -48,7 +47,6 @@ camera_preview_lock = threading.Lock()
 camera_preview_clients = {}
 frame_top_border, frame_bottom_border, frame_left_border, frame_right_border = (0, 0, 0, 0)
 message_queue = mp.Queue()
-#frame_queue = threading.Queue(maxsize=1)
 event = threading.Event() 
 
 KEEP_ASPECT_RATIO = "keep_aspect_ratio"
@@ -56,13 +54,14 @@ FREE_ASPECT_RATIO = "free_aspect_ratio"
 
 enable_uart = True
 
+enable_preview = True
+
 tracker_requested = False
 
 is_streaming_screen = False
 if is_streaming_screen:
     start_ffmpeg_screen_stream()
     
-
 tracker = None
 current_roi = None
 original_roi = None
@@ -77,19 +76,23 @@ camera_framerate = 60
 camera_size_main = (640, 480)
 camera_size_lores = (448, 360)
 
+camera_preview_framerate = 15
 
 tracker_size = camera_size_lores
 tracking_frame_size = camera_size_lores
 
-# Tracker default parameters
-roi_size = 64
-current_roi = (int(tracker_size[0] // 2 - roi_size // 2), int(tracker_size[1] // 2 - roi_size // 2), roi_size, roi_size)
+
+### Tracker default parameters ###
+#--------------------------------#
+defualt_roi_size = 64
+current_roi = (int(tracker_size[0] // 2 - defualt_roi_size // 2), int(tracker_size[1] // 2 - defualt_roi_size // 2), defualt_roi_size, defualt_roi_size)
 max_skipped_frames = 1
 using_kalman = False 
 training_images_count = 9 
 alpha_smoothing = 0.9
 max_corr = 0.3
 sigma_factor = 0.05
+# ------------------------------#
 
 ROI_ZEROS = (0, 0, 0, 0)
 
@@ -108,9 +111,7 @@ pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=True)
 roi_lock = threading.Lock()
 
 cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_framerate)
-cam.set_controls({"AeEnable": False}) 
-cam.set_controls({"ExposureTime": 6000}) 
-cam.set_controls({"AnalogueGain": 8}) 
+cam.set_controls({"AeEnable": True}) 
 cam.start()
 controls = cam.capture_metadata()
 print(f"Current exposition time: {controls['ExposureTime']} мкс")
@@ -186,32 +187,52 @@ def stop_stream_for_client(ip):
     print(f"Stream for {ip} is stoped")
             
                
-def show_camera_preview(data):
-    global camera_preview_lock, camera_preview_thread, camera_preview_clients#, is_camera_preview_running
+def show_camera_preview_by_client(data):
+    global camera_preview_thread, camera_preview_clients
+    if event.is_set():
+        print("Camera preview is already running")
+        return
     event.set()
     camera_preview_clients[data["ip"]] = True
     if camera_preview_thread is not None:
-        print(f"Camera preview thread is already running ({data['ip']} is initiator), skipping...")
+        print("Camera preview thread is already running")
         return
   
     frame_time_ms = int(1000 / data["frame_rate"])
     camera_preview_thread = threading.Thread(target=_camera_preview_loop, args=(frame_time_ms,))
-    #camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(frame_time_ms,))
     print(f"Camera preview is starting by {data['ip']}")
     camera_preview_thread.start()
+
+
+def show_camera_preview(frame_rate=15):
+    global camera_preview_thread
+    if event.is_set():
+        print("Camera preview is already running")
+        return
+    event.set()
+    if camera_preview_thread is not None:
+        print("Camera preview was resumed")
+        return
+  
+    frame_time_ms = int(1000 / frame_rate)
+    camera_preview_thread = threading.Thread(target=_camera_preview_loop, args=(frame_time_ms,))
+    camera_preview_thread.start()
+    print("Camera preview was started")
     
     
-def stop_camera_preview(ip):
-    global camera_preview_thread, camera_preview_clients#, is_camera_preview_running
+def stop_camera_preview_by_client(ip):
+    global camera_preview_thread, camera_preview_clients
     if ip in camera_preview_clients:
         del camera_preview_clients[ip]
     if not camera_preview_clients:
         event.clear()
-        # if camera_preview_thread and camera_preview_thread.is_alive():
-        #     print("Camera preview is still alive, joining...")
-        #     camera_preview_thread.join()
-        #     camera_preview_thread = None
-        print("Camera preview is stopped")
+        print(f"Camera preview is stopped by client ({ip})")
+
+
+def stop_camera_preview():
+    event.clear()
+    print("Camera preview was stopped")
+
 
 def process_message_queue():
     try:
@@ -225,6 +246,7 @@ def process_message_queue():
     except queue.Empty:
         pass
 
+
 def change_frame_borders(data):
     global frame_top_border, frame_bottom_border, frame_left_border, frame_right_border
     frame_top_border = data["top"]
@@ -235,7 +257,6 @@ def change_frame_borders(data):
         message_queue.put(KEEP_ASPECT_RATIO)
     else:
         message_queue.put(FREE_ASPECT_RATIO)
-
 
 
 def _camera_preview_loop(frame_time_ms):
@@ -312,6 +333,7 @@ def toggle_roi(enabled):
         print("Disabling ROI drawing")
         pipeline.disable_operation(draw_roi.__name__)
 
+
 def toggle_crosshair(enabled):
     if enabled:
         print("Enabling crosshair drawing")
@@ -336,7 +358,6 @@ def stop_tracking(from_uart=False):
 def request_tracking_client():
     if tracker_initialized:
         return
-    print("Requesting tracking from UART")
     server.send_command_to_clients(Command.REQUEST_TRACKING)
     
     
@@ -353,9 +374,9 @@ def request_tracking_server():
             current_roi = (tracker_size[0] // 2 - original_roi[2] // 2, tracker_size[1] // 2 - original_roi[3] // 2, original_roi[2], original_roi[3])
             print(f"Tracking was initialized with {current_roi} roi")
         else:
-            default_size = 64
-            current_roi = (tracker_size[0] // 2 - default_size // 2, tracker_size[1] // 2 - default_size // 2, default_size, default_size)
-            print(f"current_roi is None so tracking was initialized with default region size of {default_size}x{default_size} and roi is {current_roi}")
+            current_roi = (tracker_size[0] // 2 - defualt_roi_size // 2, tracker_size[1] // 2 - defualt_roi_size // 2, defualt_roi_size, defualt_roi_size)
+            print(f"current_roi is None so tracking was initialized with default region size of {defualt_roi_size}x{defualt_roi_size} and roi is {current_roi}")
+    request_tracking_client()
     
     
 def get_tracker():
@@ -375,37 +396,44 @@ def capture_frame(resolution="lores"):
     return frame
 
 
-def main():
-    global current_frame, latest_frame, current_roi, tracker_initialized, uart_lock, tracker_requested
-    
-    subscribe(UPDATE_TRACKING, update_tracking)
-    subscribe(STOP_TRACKING, stop_tracking)
-    subscribe(START_STREAM_FOR_CLIENT, start_stream_for_client)
-    subscribe(STOP_STREAM_FOR_CLIENT, stop_stream_for_client)
-    subscribe(SEND_CFS, set_uart_coefs)
-    subscribe(REQUEST_TRACKING, request_tracking_server)
-    subscribe(SHOW_CAMERA_PREVIEW, show_camera_preview)
-    subscribe(STOP_CAMERA_PREVIEW, stop_camera_preview)
-    subscribe(TOGGLE_ROI, toggle_roi)
-    subscribe(TOGGLE_CROSSHAIR, toggle_crosshair)
-    subscribe(CHANGE_FRAME_BORDERS, change_frame_borders)
-    
-    register_zeroconf(server.ip, server_port, stream_protocol.name, ffmpeg_port, tracking_frame_size)
-    
-    fps_counter = FPSCounter()
-    
-    if enable_uart:
-        open_serial()
-        print("Starting UART receiving...")
-        threading.Thread(target=serial_receive_loop, daemon=True).start()
+def reset_server_state():
+    global tracker_initialized, current_roi, tracker_requested, latest_frame, current_frame
+    tracker_initialized = False
+    current_roi = None
+    tracker_requested = False
+    latest_frame = None
+    current_frame = None
 
-    unsuccessful_tracking_frames = 0
-    max_unsuccessful_tracking_frames = 30
-    wait_in_seconds_to_send_tracker_data = 0.3
-    
-    print("Server is started\n")
+
+def main():
+    print("Server is started.\n")
     try:
+        while True:
+            reset_server_state()
+            start_main_loop()
+    except KeyboardInterrupt:
+        print('\nClosing server...')
+        server.send_command_to_clients(Command.DISCONNECT)
+        server.close_clients_pipes()
+        print('\nClosing ffmpeg proccesses if were enabled...')
+        stop_ffmpeg_procces()
+        print('\nClosing serial port...')
+        close_serial()
+        print('\nClosing camera preview if was enabled...')
+        cv2.destroyAllWindows()
+    print('\nServer closed.')
+        
+        
+def start_main_loop():
+    global current_frame, latest_frame, current_roi, tracker_initialized, uart_lock, tracker_requested
+    try:
+        fps_counter = FPSCounter()
+            
+        unsuccessful_tracking_frames = 0
+        max_unsuccessful_tracking_frames = 30
+        wait_in_seconds_to_send_tracker_data = 0.3
         start_timer_tracker_data = time.time()
+        print("Main loop (tracker) is started.\n")
         while True:
             if is_streaming_screen:
                 with stream_lock:
@@ -464,31 +492,46 @@ def main():
                                     server.send_command_to_clients(Command.TRACKER_DATA, tracker_data)
                                 else:
                                     server.send_new_roi_to_clients(ROI_ZEROS)
- 
             with latest_frame_lock:
                 latest_frame = frame
-            
-            #if not frame_queue.full():
-            #    frame_queue.put(frame)
-             
+                
             if enable_uart:   
                 packet = prepare_uart_data(uart_coefs)
                 with uart_lock:   
                     serial_transmit_binary(packet)
-
     except KeyboardInterrupt:
-        print('\nClosing server...')
-    finally:
-        server.send_command_to_clients(Command.DISCONNECT)
-        server.close_clients_pipes()
-        print('\nClosing ffmpeg proccesses if were enabled...')
-        stop_ffmpeg_procces()
-        print('\nClosing serial port...')
-        close_serial()
-        print('\nClosing camera preview if was enabled...')
-        cv2.destroyAllWindows()
-        print('\nServer closed.')
+        print("KeyboardInterrupt detected. Exiting main loop...")
+        raise
+    except Exception as e:
+        print(f"An error occurred in the main loop: {e}")
+        restart_s = 5
+        print(f"Attempting to restart main loop in {restart_s} seconds...")
+        time.sleep(restart_s)
+   
    
 if __name__ == "__main__": 
     print("Starting tracking server...\n")
+    subscribe(UPDATE_TRACKING, update_tracking)
+    subscribe(STOP_TRACKING, stop_tracking)
+    subscribe(START_STREAM_FOR_CLIENT, start_stream_for_client)
+    subscribe(STOP_STREAM_FOR_CLIENT, stop_stream_for_client)
+    subscribe(SEND_CFS, set_uart_coefs)
+    subscribe(REQUEST_TRACKING, request_tracking_server)
+    subscribe(SHOW_CAMERA_PREVIEW, show_camera_preview_by_client)
+    subscribe(STOP_CAMERA_PREVIEW, stop_camera_preview_by_client)
+    subscribe(TOGGLE_ROI, toggle_roi)
+    subscribe(TOGGLE_CROSSHAIR, toggle_crosshair)
+    subscribe(CHANGE_FRAME_BORDERS, change_frame_borders)
+    
+    register_zeroconf(server.ip, server_port, stream_protocol.name, ffmpeg_port, tracking_frame_size)
+    
+    if enable_uart:
+        open_serial()
+        print("Starting UART receiving...")
+        threading.Thread(target=serial_receive_loop, daemon=True).start()
+        
+    if enable_preview:
+        print("Starting camera preview...")
+        show_camera_preview(frame_rate=camera_preview_framerate)
+    
     main()

@@ -73,7 +73,7 @@ class Server:
         except Exception as e:
             print(f"Error in client handler: {e}")
         finally:
-            print(f"Client {addr} disconnected")
+            print(f"Client {addr} is disconnected.")
             with self.client_connections_lock:
                 self.client_connections.remove(conn)
             conn.close() 
@@ -187,7 +187,7 @@ class Server:
         if self.check_client(ip):
             self.clients[ip].stdin.close()
             self.clients[ip].wait()
-            print(f"Closed pipe for client {ip}.")
+            print(f"Closed pipe for client {ip}")
         else:
             print(f"No pipe found for client {ip} to close.")
          
