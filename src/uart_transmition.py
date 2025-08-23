@@ -1,10 +1,13 @@
 import serial
 import time
+import RPi.GPIO as GPIO
 
 from src.command import Command
-from src.event_types import REQUEST_TRACKING, STOP_TRACKING
+from src.event_types import REQUEST_TRACKING, STOP_TRACKING, CHANGE_ROI_FROM_UART
 from src.event import post_event
 
+#№GPIO.setmode(GPIO.BCM)
+#GPIO.setup(15, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 
 def serial_transmit(data):
     if ser.is_open:
@@ -35,11 +38,21 @@ def serial_receive_loop():
         try:
             data_bytes = ser.readline() 
             if not data_bytes:
-                post_event(STOP_TRACKING, True) 
-            else:
-                decoded_data = data_bytes.decode("utf-8").strip()
-                if decoded_data == Command.UART_START_TRACKING:
-                    post_event(REQUEST_TRACKING)
+                #post_event(STOP_TRACKING, True)
+                continue
+            #else:
+            print("data bytes:", data_bytes)
+            decoded_data = data_bytes.decode("utf-8").strip()
+            print("decoded data:", decoded_data)
+            if decoded_data == Command.UART_START_TRACKING:
+                post_event(REQUEST_TRACKING)
+            elif decoded_data == Command.UART_STOP_TRACKING:
+                post_event(STOP_TRACKING)
+            elif decoded_data == Command.UART_CHANGE_ROI:
+                value_bytes = ser.readline()
+                decoded_value = int(value_bytes.decode("utf-8").strip())
+                post_event(CHANGE_ROI_FROM_UART, decoded_value)
+                #print("Decoded int value:", decoded_value)
         except serial.SerialException as e:
             print(f"Error occured in serial receive loop: {e}\nTrying to reopen serial port...")
             ser.close()
@@ -61,8 +74,8 @@ ser.timeout = 0.5
 ser.bytesize = serial.EIGHTBITS
 ser.parity = serial.PARITY_NONE
 ser.stopbits = 1
-if not ser.is_open:
-    ser.open()
-print("Serial port is opened.")
+# if not ser.is_open:
+#     ser.open()
+# print("Serial port is opened.")
 
 

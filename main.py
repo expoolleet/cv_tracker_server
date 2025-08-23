@@ -52,7 +52,7 @@ event = threading.Event()
 KEEP_ASPECT_RATIO = "keep_aspect_ratio"
 FREE_ASPECT_RATIO = "free_aspect_ratio"
 
-enable_uart = False
+enable_uart = True
 
 enable_preview = True
 
@@ -67,9 +67,9 @@ latest_frame = None
 
 camera_framerate = 60
 camera_size_main = (640, 480)
-camera_size_lores = (448, 360)
+camera_size_lores = camera_size_main#(448, 360)
 
-camera_preview_framerate = 15
+camera_preview_framerate = 24
 
 
 ### Tracker default parameters ###

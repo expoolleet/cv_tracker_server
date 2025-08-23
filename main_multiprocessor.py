@@ -20,7 +20,8 @@ from src.event_types import (
     STOP_CAMERA_PREVIEW,
     TOGGLE_ROI,
     TOGGLE_CROSSHAIR,
-    CHANGE_FRAME_BORDERS )
+    CHANGE_FRAME_BORDERS,
+    CHANGE_ROI_FROM_UART)
 from src.command import Command
 from src.zeroconf import register_zeroconf
 from src.picamera import setup_camera
@@ -53,7 +54,7 @@ message_queue = mp.Queue()
 KEEP_ASPECT_RATIO = "keep_aspect_ratio"
 FREE_ASPECT_RATIO = "free_aspect_ratio"
 
-enable_uart = False
+enable_uart = True
 
 enable_preview = True
 
@@ -66,13 +67,13 @@ if is_streaming_screen:
 latest_frame_lock = threading.Lock()
 latest_frame = None
 
-camera_framerate = 60
-camera_frametime = 1/camera_framerate
+camera_frame_rate = 60
+camera_frame_time = 1 / camera_frame_rate
 camera_size_main = (640, 480)
-camera_size_lores = (448, 360)
+camera_size_lores = camera_size_main#(448, 360)
 
-camera_preview_framerate = 15
-
+camera_preview_frame_rate = 24
+camera_preview_frame_time_ms = mp.Value('i', int(1000 / camera_preview_frame_rate))
 
 ### Tracker default parameters ###
 #--------------------------------#
@@ -88,12 +89,12 @@ tracking_frame_size = camera_size_lores
 defualt_roi_size = 64
 current_roi_size = defualt_roi_size
 data_dict["current_roi"] = (int(tracker_size[0] // 2 - defualt_roi_size // 2), int(tracker_size[1] // 2 - defualt_roi_size // 2), defualt_roi_size, defualt_roi_size)
-data_dict["max_skipped_frames"] = 1
-data_dict["using_kalman"] = False 
-data_dict["training_images_count"] = 9 
-data_dict["alpha_smoothing"] = 0.9
-data_dict["max_corr"] = 0.3
-data_dict["sigma_factor"] = 0.05
+tracker_dict["max_skipped_frames"] = 1
+tracker_dict["using_kalman"] = False 
+tracker_dict["training_images_count"] = 9 
+tracker_dict["alpha_smoothing"] = 0.9
+tracker_dict["max_corr"] = 0.3
+tracker_dict["sigma_factor"] = 0.05
 # ------------------------------#
 
 ROI_ZEROS = (0, 0, 0, 0)
@@ -112,7 +113,7 @@ pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=True)
 
 roi_lock = mp.Lock()
 
-cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_framerate)
+cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
 cam.set_controls({"AeEnable": True})
 cam.start()
 controls = cam.capture_metadata()
@@ -124,6 +125,7 @@ frame_shape = (int(camera_size_lores[1] * 1.5), camera_size_lores[0])
 frame_dtype = np.uint8
 
 stop_event = mp.Event()
+exit_event = mp.Event()
 wait_first_frame_event = mp.Event()
 
 
@@ -135,14 +137,9 @@ def reset_roi():
 
 # https://docs.python.org/3/library/struct.html
 def prepare_uart_data(data_to_send):
-    global current_roi
     data = data_to_send.copy()
-    if current_roi is not None:
-        dx = tracker_size[0] // 2 - (current_roi[0] + current_roi[2] // 2)
-        dy = tracker_size[1] // 2 - (current_roi[1] + current_roi[3] // 2)  
-    else:
-        dx = 0
-        dy = 0
+    dx = tracker_size[0] // 2 - (data_dict["current_roi"][0] + data_dict["current_roi"][2] // 2)
+    dy = tracker_size[1] // 2 - (data_dict["current_roi"][1] + data_dict["current_roi"][3] // 2)  
     data.append(dx)
     data.append(dy)
     data = np.clip(data, -128, 127)
@@ -203,8 +200,16 @@ def stop_stream_for_client(ip):
             
                
 def show_camera_preview_by_client(data, stop_event):
-    global camera_preview_thread, camera_preview_clients
+    global camera_preview_thread, camera_preview_clients, camera_preview_frame_rate
+    if not isinstance(data["frame_rate"], int):
+        print(f"Wrong data for frame_rate! ({data['frame_rate']})")
+        return
+    
+    camera_preview_frame_rate = data["frame_rate"]
+    frame_time_ms = int(1000 / camera_preview_frame_rate)
+    camera_preview_frame_time_ms.value = frame_time_ms
     camera_preview_clients[data["ip"]] = True
+    
     if stop_event.is_set():
         print("Camera preview is already running")
         return
@@ -212,9 +217,8 @@ def show_camera_preview_by_client(data, stop_event):
     if camera_preview_thread is not None:
         print("Camera preview thread is already running")
         return
-  
-    frame_time_ms = int(1000 / data["frame_rate"])
-    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(frame_time_ms, stop_event, sm_name, frame_shape, frame_dtype))
+    
+    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(stop_event, exit_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
     print(f"Camera preview is starting by {data['ip']}")
     camera_preview_thread.start()
 
@@ -228,9 +232,9 @@ def show_camera_preview(frame_rate, stop_event):
     if camera_preview_thread is not None:
         print("Camera preview was resumed")
         return
-  
+    
     frame_time_ms = int(1000 / frame_rate)
-    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(frame_time_ms, stop_event, sm_name, frame_shape, frame_dtype))
+    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(stop_event, exit_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
     camera_preview_thread.start()
     print("Camera preview was started")
     
@@ -272,22 +276,37 @@ def change_frame_borders(data):
         message_queue.put(KEEP_ASPECT_RATIO)
     else:
         message_queue.put(FREE_ASPECT_RATIO)
+     
+        
+def change_roi_from_uart(value):
+    global current_roi_size
+    a = 182
+    b = 1811
+    min_size = 32
+    max_size = 128
+    step = 4
+    norm_value = (np.clip(value, a, b) - a) / (b - a)
+    steps = round(norm_value * (max_size - min_size) / step)
+    current_roi_size = min_size + steps * step
+    print(current_roi_size)
+    reset_roi()
 
 
-def _camera_preview_loop(frame_time_ms, stop_event, shared_memory_name, frame_shape, frame_dtype):
+def _camera_preview_loop(stop_event, exit_event, shared_memory_name, frame_shape, frame_dtype, frame_time_ms):
     try:
         cv2.namedWindow(window_name, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_NORMAL)
         cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         print("Camera preview loop is started")
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
-        while True:
+        while not exit_event.is_set():
             stop_event.wait()
+            frame_time_ms = camera_preview_frame_time_ms.value
 
             frame = sm_client.get_frame()
-            if frame is None:
-                print("No frames available for camera preview, skipping...")
-                time.sleep(0.1)
-                continue
+            # if frame is None:
+            #     print("No frames available for camera preview, skipping...")
+            #     time.sleep(0.1)
+            #     continue
 
             if len(pipeline.active_pipeline_steps) > 0:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
@@ -427,9 +446,11 @@ def main(frame_shared_memory_handler, shared_memory_name):
         print('\nClosing serial port...')
         close_serial()
         print('\nClosing camera preview if was enabled...')
-        cv2.destroyAllWindows()
+        stop_event.set()
+        exit_event.set()
         frame_shared_memory_handler.close()
         manager.shutdown()
+        cv2.destroyAllWindows()
     print('\nServer closed.')
         
         
@@ -477,14 +498,14 @@ def start_main_loop(shared_memory_name):
         sm_client.close()
 
 
-def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_frametime, wait_first_frame_event):
+def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_frametime, wait_first_frame_event, exit_event):
     wait_first_frame_event.wait()
     sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
     fps_counter = FPSCounter()      
 
     try:
         start_time = time.time()
-        while True:
+        while not exit_event.is_set():
             tracker_requested = data_dict.get("tracker_requested", False)
             tracker_initialized = data_dict.get("tracker_initialized", False)
             current_roi = data_dict.get("current_roi", (0, 0, 0, 0))
@@ -544,6 +565,7 @@ if __name__ == "__main__":
     subscribe(TOGGLE_ROI, toggle_roi)
     subscribe(TOGGLE_CROSSHAIR, toggle_crosshair)
     subscribe(CHANGE_FRAME_BORDERS, change_frame_borders)
+    subscribe(CHANGE_ROI_FROM_UART, change_roi_from_uart)
     
     register_zeroconf(server.ip, server_port, stream_protocol.name, ffmpeg_port, tracking_frame_size)
     
@@ -554,9 +576,9 @@ if __name__ == "__main__":
         
     if enable_preview:
         print("Starting camera preview...")
-        show_camera_preview(frame_rate=camera_preview_framerate, stop_event=stop_event)
+        show_camera_preview(frame_rate=camera_preview_frame_rate, stop_event=stop_event)
 
-    tracking_process = mp.Process(target=tracking, args=(sm_name, frame_shape, frame_dtype, data_dict, camera_frametime, wait_first_frame_event,))
+    tracking_process = mp.Process(target=tracking, args=(sm_name, frame_shape, frame_dtype, data_dict, camera_frame_time, wait_first_frame_event, exit_event,))
     tracking_process.start()
     main(frame_shared_memory_handler, sm_name)
 

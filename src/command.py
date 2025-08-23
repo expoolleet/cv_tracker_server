@@ -10,6 +10,8 @@ class Command:
     SEND_CFS = "send_cfs"
     REQUEST_TRACKING = "request_tracking"
     UART_START_TRACKING = "t"
+    UART_STOP_TRACKING = "s"
+    UART_CHANGE_ROI = "r"
     START_TRANSMISSION = "start_transmission"
     STOP_TRANSMISSION = "stop_transmission"
     CHANGE_FRAME_BORDERS = "change_frame_borders"
