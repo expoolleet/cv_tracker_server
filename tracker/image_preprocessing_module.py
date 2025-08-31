@@ -23,3 +23,6 @@ def image_preprocessing(im: np.ndarray, use_log : bool = True, window_strength: 
     
     normalized = (image - mean_val) / (std_val + epsilon)
     return normalized.astype(FLOAT_TYPE)
+
+
+image_preprocessing(np.array([[1, 1]]))

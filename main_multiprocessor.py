@@ -37,6 +37,7 @@ from tracker.fast_mosse_tracker import FastMosseTracker
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''
 os.environ['QT_QPA_PLATFORM'] = 'eglfs'
 
+
 class Tracker:
     MOSSE = "MOSSE"
     MK = "MK"
@@ -47,7 +48,7 @@ window_name = 'Fullscreen PiCamera2 Feed'
 camera_preview_thread = None
 camera_preview_lock = threading.Lock()
 camera_preview_clients = {}
-frame_top_border, frame_bottom_border, frame_left_border, frame_right_border = (0, 0, 0, 0)
+frame_top_border, frame_bottom_border, frame_left_border, frame_right_border = (25, 5, 0, 0)
 message_queue = mp.Queue()
 #event = threading.Event() 
 
@@ -71,6 +72,7 @@ camera_frame_rate = 60
 camera_frame_time = 1 / camera_frame_rate
 camera_size_main = (640, 480)
 camera_size_lores = camera_size_main#(448, 360)
+camera_restart_timeout = 5
 
 camera_preview_frame_rate = 24
 camera_preview_frame_time_ms = mp.Value('i', int(1000 / camera_preview_frame_rate))
@@ -93,7 +95,7 @@ tracker_dict["max_skipped_frames"] = 1
 tracker_dict["using_kalman"] = False 
 tracker_dict["training_images_count"] = 9 
 tracker_dict["alpha_smoothing"] = 0.9
-tracker_dict["max_corr"] = 0.3
+tracker_dict["max_corr"] = 0.45
 tracker_dict["sigma_factor"] = 0.05
 # ------------------------------#
 
@@ -113,9 +115,19 @@ pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=True)
 
 roi_lock = mp.Lock()
 
-cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
-cam.set_controls({"AeEnable": True})
-cam.start()
+cam = None
+def reset_camera():
+    global cam
+    if cam is not None:
+        cam.close()
+    cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
+    cam.set_controls({"AeEnable": True})
+    cam.start()
+
+reset_camera()
+# cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
+# cam.set_controls({"AeEnable": True})
+# cam.start()
 controls = cam.capture_metadata()
 print(f"Current exposition time: {controls['ExposureTime']} мкс")
 print(f"Current analogue gain: {controls['AnalogueGain']}")
@@ -127,6 +139,9 @@ frame_dtype = np.uint8
 stop_event = mp.Event()
 exit_event = mp.Event()
 wait_first_frame_event = mp.Event()
+is_camera_closed_event = mp.Event()
+got_frame_event = threading.Event()
+main_loop_event = threading.Event()
 
 
 current_tracker = Tracker.MK
@@ -218,7 +233,7 @@ def show_camera_preview_by_client(data, stop_event):
         print("Camera preview thread is already running")
         return
     
-    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(stop_event, exit_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
+    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(stop_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
     print(f"Camera preview is starting by {data['ip']}")
     camera_preview_thread.start()
 
@@ -234,7 +249,7 @@ def show_camera_preview(frame_rate, stop_event):
         return
     
     frame_time_ms = int(1000 / frame_rate)
-    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(stop_event, exit_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
+    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(stop_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
     camera_preview_thread.start()
     print("Camera preview was started")
     
@@ -292,28 +307,29 @@ def change_roi_from_uart(value):
     reset_roi()
 
 
-def _camera_preview_loop(stop_event, exit_event, shared_memory_name, frame_shape, frame_dtype, frame_time_ms):
+def _camera_preview_loop(stop_event, exit_event, is_camera_closed_event, shared_memory_name, frame_shape, frame_dtype, frame_time_ms):
     try:
         cv2.namedWindow(window_name, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_NORMAL)
         cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        print("Camera preview loop is started")
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
+        no_frame_image = cv2.putText(np.zeros((480, 640)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
+        print("Camera preview loop is started")
         while not exit_event.is_set():
             stop_event.wait()
             frame_time_ms = camera_preview_frame_time_ms.value
-
-            frame = sm_client.get_frame()
-            # if frame is None:
-            #     print("No frames available for camera preview, skipping...")
-            #     time.sleep(0.1)
-            #     continue
-
-            if len(pipeline.active_pipeline_steps) > 0:
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
-                processed_data = pipeline.process(rgb_frame, data_dict["current_roi"])
-                frame = processed_data[0]
+            
+            if not is_camera_closed_event.is_set():
+                frame = sm_client.get_frame()
             else:
-                frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                frame = no_frame_image
+            
+            if not is_camera_closed_event.is_set():
+                if len(pipeline.active_pipeline_steps) > 0:
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                    processed_data = pipeline.process(rgb_frame, data_dict["current_roi"])
+                    frame = processed_data[0]
+                else:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
             frame = cv2.copyMakeBorder(frame, frame_top_border, frame_bottom_border, frame_left_border, frame_right_border, None, value = 0)
             try:
                 cv2.imshow(window_name, frame)
@@ -397,9 +413,10 @@ def request_tracking_server():
     tracker_requested = data_dict.get("tracker_requested", False)
     if tracker_initialized or tracker_requested:
         return
-    data_dict["tracker_requested"] = True
+
     print("Requesting tracking from UART")
     with roi_lock:
+        data_dict["tracker_requested"] = True
         data_dict["tracker_initialized"] = False
         reset_roi()
     request_tracking_client()
@@ -417,14 +434,38 @@ def get_tracker():
                                 output_sigma_factor=tracker_dict["sigma_factor"])
 
 
-def capture_frame(resolution="lores"):
-    frame = cam.capture_array(resolution)
-    return frame
+
+
+# def capture_frame(resolution="lores"):
+#     got_frame_event.set()
+#     frame = cam.capture_array(resolution)
+#     got_frame_event.clear()
+#     return frame
+def capture_frame(resolution="lores", timeout=0.5):
+    global cam
+    job = cam.capture_request(wait=False)  # получаем Job
+    try:
+        request = cam.wait(job, timeout=timeout)  # Ждём его завершения
+        frame = request.make_array(resolution)
+        request.release()
+        if is_camera_closed_event.is_set():
+            is_camera_closed_event.clear()
+        return frame
+    except Exception as e:
+        print("Timeout or error:", e)
+        try:
+            if not is_camera_closed_event.is_set():
+                is_camera_closed_event.set()
+            reset_camera()
+        except RuntimeError:
+            time.sleep(camera_restart_timeout)
+    return None
 
 
 def reset_server_state():
     data_dict["tracker_initialized"] = False
     data_dict["tracker_requested"] = False
+    main_loop_event.clear()
     reset_roi()
 
 
@@ -461,8 +502,11 @@ def start_main_loop(shared_memory_name):
         wait_in_seconds_to_send_tracker_data = 0.3
         start_timer_tracker_data = time.time()
         print("Main loop is started.\n")
-        while True: 
+        while not main_loop_event.is_set(): 
             frame = capture_frame()
+            if frame is None:
+                continue
+            
             sm_client.set_frame(frame)
             with latest_frame_lock:
                 latest_frame = frame
@@ -485,7 +529,6 @@ def start_main_loop(shared_memory_name):
                     serial_transmit_binary(packet)
             if not wait_first_frame_event.is_set():
                 wait_first_frame_event.set()
-            #time.sleep(0.01)
     except KeyboardInterrupt:
         print("KeyboardInterrupt detected. Exiting main loop...")
         raise
