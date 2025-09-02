@@ -72,6 +72,7 @@ cdef class FastMosseTracker:
         list expanded_scale_factors
         list correlation_history
         list tracker_bank
+        list search_strategies
 
         bool is_debugging
         bool is_tracking
@@ -98,6 +99,7 @@ cdef class FastMosseTracker:
         int frame_count
         int xort_rescale
         int xort_rescale_type
+        int update_xor_tracker_every_n_frames
         int correlation_history_max_capacity
 
         object predict
@@ -120,7 +122,7 @@ cdef class FastMosseTracker:
                 FLOAT_TYPE_t alpha_smoothing=0.9, 
                 int training_images_count=9, 
                 FLOAT_TYPE_t output_sigma_factor=0.05,
-                FLOAT_TYPE_t correlation_target=0.45,
+                FLOAT_TYPE_t correlation_target=0.5,
                 tuple rotation_range=(-3, 3),
                 tuple scale_range=(0.95, 1.05),
                 list scale_factors=[0.7, 0.85, 1.0],   
@@ -143,9 +145,9 @@ cdef class FastMosseTracker:
         self.training_images_count = training_images_count
         self.epsilon = 1e-6
         self.adaptive_rate = 0.0
-
         self.correlation_history_max_capacity = 5
         self.correlation_history = []
+        self.frame_count = -1
 
         ## Kalman Filter
         if kalman is None:
@@ -184,8 +186,6 @@ cdef class FastMosseTracker:
         self.scale_range = scale_range
         self.output_sigma_factor = output_sigma_factor
     
-        self.debug = {}
-        
         # Recovery
         self.is_recovery_enabled = is_recovery_enabled
         self.tracker_bank_max_count = 10
@@ -193,7 +193,6 @@ cdef class FastMosseTracker:
         self.frame_count_from_last_recovery = 0
         self.is_tracking_recovered = False
         self.tracker_bank_index = 0
-
         
         # Point smoothness
         self.smoothed_x = 0
@@ -209,12 +208,23 @@ cdef class FastMosseTracker:
         self.output_buffer_ifft = None
         self.num_pyfftw_threads = 0
         
-        self.frame_count = -1
-
+        # XOR Tracker
         self.xort = XORTracker()
         self.xort_rescale = 2
         self.xort_rescale_type = cv2.INTER_NEAREST
         self.confirm_buf = deque(maxlen=5)
+        self.update_xor_tracker_every_n_frames = 3
+        self.search_strategies = [
+            (10, lambda im: (int(im.shape[1] * 0.85), int(im.shape[0] * 0.85))),
+            (8,  lambda im: (int(im.shape[1] * 0.7),  int(im.shape[0] * 0.7))),
+            (6,  lambda im: (im.shape[1] // 2,        int(im.shape[0] * 0.85))),
+            (4,  lambda im: (int(im.shape[1] * 0.85), im.shape[0] // 2)),
+            (2,  lambda im: (im.shape[1] // 2,        im.shape[0] // 2)),
+            (0,  lambda im: (im.shape[1] // 3,        im.shape[0] // 3)),
+        ]
+
+        # Debug
+        self.debug = {}
         
         
     cpdef bool init(self, np.ndarray[np.uint8_t, ndim=2] im, tuple roi):
@@ -377,7 +387,7 @@ cdef class FastMosseTracker:
 
             if current_max_correlation > self.high_correlation_threshold:
                 self._add_data_to_tracker_bank((template, preprocessed_template_f, im, best_roi))
-       
+        
             correlation_map = self._compute_ifft(self.computed_filter * preprocessed_template_f)
             apce = self._calculate_apce(correlation_map, template)
             self._update_adaptive_learning_rate(apce)
@@ -392,9 +402,6 @@ cdef class FastMosseTracker:
         if len(self.correlation_history) > self.correlation_history_max_capacity:
             self.correlation_history.pop(0)
 
-        #if len(self.correlation_history) < self.correlation_history_max_capacity:
-        #    previous_correlations_avg = self.last_max_correlation
-        #else:
         previous_correlations_avg = np.mean(self.correlation_history[:-1])
             
         self._update_tracking_state(im, current_max_correlation, previous_correlations_avg, correlation_deviation)
@@ -404,16 +411,12 @@ cdef class FastMosseTracker:
             self.current_template_scale = new_template_scale
             self.current_roi = best_roi
         
-        # cdef:
-        #     np.ndarray[COMPLEX_TYPE_t, ndim=2] new_energy, new_weight
-        #     np.ndarray[FLOAT_TYPE_t, ndim=2] new_correlation_map
-        #     list search_scales
         if self.is_tracking:
 
             self.predicted_global_point = self.predict(self.current_global_point[0], self.current_global_point[1])
             self.last_real_global_point = self.current_global_point
 
-            if self.frame_count % 3 == 0:
+            if self.frame_count % self.update_xor_tracker_every_n_frames == 0:
                 self.update_xor_tracker(im, x, y)
         elif self.is_recovery_enabled and not self.is_tracking_recovered:
             if self.tracking_lost_current_attempt > self.tracking_lost_max_attempts:
@@ -430,24 +433,12 @@ cdef class FastMosseTracker:
                     self.tracker_bank_index = len(self.tracker_bank) - 1
                 self.tracking_lost_current_attempt = 0
 
-            if self.tracking_lost_current_attempt >= 10:
-                x, y, is_xor_tracking_good = self.target_search(im, int(im.shape[1] * 0.85), int(im.shape[0] * 0.85))
-                print("checking 85%")
-            elif self.tracking_lost_current_attempt >= 8:
-                x, y, is_xor_tracking_good = self.target_search(im, int(im.shape[1] * 0.7), int(im.shape[0] * 0.7))
-                print('checking 70%')  
-            elif self.tracking_lost_current_attempt >= 6:
-                x, y, is_xor_tracking_good = self.target_search(im, im.shape[1] // 2, int(im.shape[0] * 0.9))
-                print('checking vertiacal')    
-            elif self.tracking_lost_current_attempt >= 4:
-                x, y, is_xor_tracking_good = self.target_search(im, int(im.shape[1] * 0.9), im.shape[0] // 2)
-                print("checking horizontal")
-            elif self.tracking_lost_current_attempt >= 2:    
-                x, y, is_xor_tracking_good = self.target_search(im, im.shape[1] // 2, im.shape[0] // 2)
-                print("checking 50%")
-            elif self.tracking_lost_current_attempt >= 0:    
-                x, y, is_xor_tracking_good = self.target_search(im, im.shape[1] // 3, im.shape[0] // 3)
-                print("checking 30%")
+            for threshold, stategy in self.search_strategies:
+                if self.tracking_lost_current_attempt >= threshold:
+                    x, y = stategy(im)
+                    print(float(x) / im.shape[1], float(y) / im.shape[0])
+                    x, y, is_xor_tracking_good = self.target_search(im, x, y)
+                    break
                 
             self.current_roi = (x, y, w, h)
             self.current_global_point = (y + h // 2, x + w // 2)
@@ -455,13 +446,10 @@ cdef class FastMosseTracker:
             new_point, best_roi, current_max_correlation, new_template_scale, correlation_map, preprocessed_template_f = self._multi_scale_detection(im, self.current_global_point, scales=self.expanded_scale_factors)
 
             if current_max_correlation > self.correlation_target:
-
-                print("CURRENT COR", current_max_correlation)
-               
                 self.correlation_history.append(current_max_correlation)
                
                 self.current_template_scale = new_template_scale
-                self.adaptive_rate = 0.15
+                self.adaptive_rate = 0.3
                 self.current_roi = roi
                 self.current_point = new_point
                 self.current_skipped_frames_multiscale_detection = 0
@@ -610,7 +598,6 @@ cdef class FastMosseTracker:
                     print("Tracker is unstable. Using predicted point")
                     self.current_point = new_point
                     self.current_global_point = self.predicted_global_point
-                    # нашли сразу уверенно — трекинг продолжается
                     return
 
                 # нашли кандидата — включаем подтверждение
