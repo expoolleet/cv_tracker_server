@@ -5,6 +5,8 @@ np.import_array()
 import pyfftw
 import cv2
 
+from collections import deque
+
 from tracker.image_preprocessing_module import image_preprocessing
 
 from tracker.synthetic_target import make_synthetic_with_regularization 
@@ -12,6 +14,7 @@ from tracker.kalman_filter import KalmanFilter
 from tracker.xor_tracker import XORTracker
 
 COMPLEX_TYPE = np.complex64
+complex_type_name = "complex64"
 ctypedef np.complex64_t COMPLEX_TYPE_t
 
 FLOAT_TYPE = np.float32
@@ -39,14 +42,12 @@ cdef class FastMosseTracker:
         readonly FLOAT_TYPE_t correlation_target
         readonly FLOAT_TYPE_t min_correlation_for_update
         readonly FLOAT_TYPE_t adaptive_rate
-        FLOAT_TYPE_t prev_correlation_target
         FLOAT_TYPE_t epsilon
         FLOAT_TYPE_t smoothed_x
         FLOAT_TYPE_t smoothed_y
         FLOAT_TYPE_t alpha_smoothing
         FLOAT_TYPE_t output_sigma_factor
         FLOAT_TYPE_t kalman_rate
-        FLOAT_TYPE_t correlation_alpha
         FLOAT_TYPE_t current_template_scale
         FLOAT_TYPE_t multi_scale_detection_good_correlation
         FLOAT_TYPE_t high_correlation_threshold
@@ -58,7 +59,6 @@ cdef class FastMosseTracker:
         np.ndarray init_frame
         np.ndarray init_template
         np.ndarray init_template_f
-        np.ndarray init_filter
         np.ndarray high_correlation_frame
         np.ndarray high_correlation_template
         np.ndarray high_correlation_template_f
@@ -77,9 +77,8 @@ cdef class FastMosseTracker:
         bool is_tracking
         bool skip_frames
         bool is_recovery_enabled
-        bool waiting_for_recovery
         bool is_tracking_recovered
-
+    
         int training_images_count
         int tracking_lost_max_attempts
         int tracking_lost_current_attempt
@@ -87,7 +86,6 @@ cdef class FastMosseTracker:
         int default_scale_frame_count
         int skip_multiscale_detection_frames
         int current_skipped_frames_multiscale_detection
-        int skip_first_frames
         int skipped_frame_count
         int max_skipped_frames
         int delay_first_frames
@@ -95,12 +93,12 @@ cdef class FastMosseTracker:
         int num_pyfftw_threads
         int low_correlation_frame_count
         int low_correlation_frame_count_max
-        int try_recovery_every_n_frames
         int tracker_bank_index
         int frame_count_from_last_recovery
         int frame_count
         int xort_rescale
         int xort_rescale_type
+        int correlation_history_max_capacity
 
         object predict
         object fft_object
@@ -111,6 +109,7 @@ cdef class FastMosseTracker:
         object output_buffer_ifft
         object kalman
         object xort
+        object confirm_buf
 
     def __cinit__(self, 
                 kalman: KalmanFilter=None,
@@ -140,12 +139,12 @@ cdef class FastMosseTracker:
         self.last_max_correlation = 0.0
         self.correlation_target = correlation_target
         self.min_correlation_for_update = 0.8
-        self.prev_correlation_target = self.correlation_target
         self.multi_scale_detection_good_correlation = 0.7
         self.training_images_count = training_images_count
         self.epsilon = 1e-6
         self.adaptive_rate = 0.0
 
+        self.correlation_history_max_capacity = 5
         self.correlation_history = []
 
         ## Kalman Filter
@@ -161,13 +160,11 @@ cdef class FastMosseTracker:
         self.tracking_lost_max_attempts = 12
         self.tracking_lost_current_attempt = 0
         self.d_max = 15
-        self.correlation_alpha = 0.3
         self.low_correlation_frame_count = 0
         self.low_correlation_frame_count_max = 5
         self.high_correlation_threshold = 0.9
         self.correlation_deviation = 0
-        
-        
+              
         ## Multiscale detection
         self.scale_factors = scale_factors
         self.expanded_scale_factors = list((*scale_factors, 1.15, 1.3))
@@ -176,13 +173,11 @@ cdef class FastMosseTracker:
         self.skip_multiscale_detection_frames = 3
         self.current_skipped_frames_multiscale_detection = 0
             
-        
         ## Frame skipping
         self.skip_frames = skip_frames
         self.skipped_frame_count = 0
         self.max_skipped_frames = max_skipped_frames
         self.delay_first_frames = 10
-        self.skip_first_frames = 10
 
         ## Training
         self.rotation_range = rotation_range
@@ -193,12 +188,10 @@ cdef class FastMosseTracker:
         
         # Recovery
         self.is_recovery_enabled = is_recovery_enabled
-        self.waiting_for_recovery = False
         self.tracker_bank_max_count = 10
         self.tracker_bank = []
         self.frame_count_from_last_recovery = 0
         self.is_tracking_recovered = False
-        self.try_recovery_every_n_frames = 2
         self.tracker_bank_index = 0
 
         
@@ -221,6 +214,7 @@ cdef class FastMosseTracker:
         self.xort = XORTracker()
         self.xort_rescale = 2
         self.xort_rescale_type = cv2.INTER_NEAREST
+        self.confirm_buf = deque(maxlen=5)
         
         
     cpdef bool init(self, np.ndarray[np.uint8_t, ndim=2] im, tuple roi):
@@ -247,10 +241,10 @@ cdef class FastMosseTracker:
         self.high_correlation_template_roi = roi
         self.init_xor_tracker(im, roi)
 
-        self.input_buffer_fft = pyfftw.empty_aligned((h, w), dtype="complex64")
-        self.output_buffer_fft = pyfftw.empty_aligned((h, w), dtype="complex64")
+        self.input_buffer_fft = pyfftw.empty_aligned((h, w), dtype=complex_type_name)
+        self.output_buffer_fft = pyfftw.empty_aligned((h, w), dtype=complex_type_name)
         self.input_buffer_ifft = self.output_buffer_fft
-        self.output_buffer_ifft = pyfftw.empty_aligned((h, w), dtype="complex64")
+        self.output_buffer_ifft = pyfftw.empty_aligned((h, w), dtype=complex_type_name)
         self.fft_object = pyfftw.FFTW(self.input_buffer_fft,
                                       self.output_buffer_fft,
                                       axes=(0, 1),
@@ -285,7 +279,6 @@ cdef class FastMosseTracker:
         self.current_weight = weight
         self.current_energy = energy
         self.computed_filter = weight / (energy + self.epsilon)
-        self.init_filter = self.computed_filter.copy()
         template_processed = self._process_template(template)
         self.init_template_f = self._compute_fft(image_preprocessing(template_processed))
         self._add_data_to_tracker_bank((template, self.init_template_f, im, roi))
@@ -306,7 +299,7 @@ cdef class FastMosseTracker:
 
     cpdef tuple update(self, np.ndarray[np.uint8_t, ndim=2] im):
         if self.computed_filter is None:
-            raise Exception("Train the filter first!")
+            raise Exception("Init the tracker first!")
         cdef: 
             tuple template_data = self._extract_template(im, self.current_global_point, self.template_size)
             tuple roi = template_data[1]
@@ -320,7 +313,6 @@ cdef class FastMosseTracker:
             np.ndarray[COMPLEX_TYPE_t, ndim=2] target_f, preprocessed_template_f
             tuple new_point, best_roi
             FLOAT_TYPE_t new_template_scale, apce, current_max_correlation
-            float template_weight, init_template_max_correlation
             bool is_xor_tracking_good = False, is_xor_tracking_excellent = False
         
         self.frame_count += 1 
@@ -390,22 +382,20 @@ cdef class FastMosseTracker:
             apce = self._calculate_apce(correlation_map, template)
             self._update_adaptive_learning_rate(apce)
 
-        cdef FLOAT_TYPE_t previous_correlation
-        cdef int max_capacity = 5
-        cdef FLOAT_TYPE_t previous_correlations_avg = 0.0
+        cdef FLOAT_TYPE_t previous_correlations_avg
 
         if self.is_tracking:
             correlation_deviation = self.correlation_deviation
         else:
             correlation_deviation = self.correlation_deviation * 1.25
         
-        if len(self.correlation_history) > max_capacity:
+        if len(self.correlation_history) > self.correlation_history_max_capacity:
             self.correlation_history.pop(0)
 
-        if len(self.correlation_history) < max_capacity:
-            previous_correlations_avg = self.last_max_correlation
-        else:
-            previous_correlations_avg = np.mean(self.correlation_history[:-1])
+        #if len(self.correlation_history) < self.correlation_history_max_capacity:
+        #    previous_correlations_avg = self.last_max_correlation
+        #else:
+        previous_correlations_avg = np.mean(self.correlation_history[:-1])
             
         self._update_tracking_state(im, current_max_correlation, previous_correlations_avg, correlation_deviation)
             
@@ -414,16 +404,17 @@ cdef class FastMosseTracker:
             self.current_template_scale = new_template_scale
             self.current_roi = best_roi
         
-        cdef:
-            np.ndarray[COMPLEX_TYPE_t, ndim=2] new_energy, new_weight
-            np.ndarray[FLOAT_TYPE_t, ndim=2] new_correlation_map
-            list search_scales
+        # cdef:
+        #     np.ndarray[COMPLEX_TYPE_t, ndim=2] new_energy, new_weight
+        #     np.ndarray[FLOAT_TYPE_t, ndim=2] new_correlation_map
+        #     list search_scales
         if self.is_tracking:
 
             self.predicted_global_point = self.predict(self.current_global_point[0], self.current_global_point[1])
             self.last_real_global_point = self.current_global_point
 
-            self.update_xor_tracker(im, x, y)
+            if self.frame_count % 3 == 0:
+                self.update_xor_tracker(im, x, y)
         elif self.is_recovery_enabled and not self.is_tracking_recovered:
             if self.tracking_lost_current_attempt > self.tracking_lost_max_attempts:
 
@@ -468,8 +459,6 @@ cdef class FastMosseTracker:
                 print("CURRENT COR", current_max_correlation)
                
                 self.correlation_history.append(current_max_correlation)
-
-                template_weight = 0.9 * current_max_correlation  
                
                 self.current_template_scale = new_template_scale
                 self.adaptive_rate = 0.15
@@ -555,11 +544,11 @@ cdef class FastMosseTracker:
                                   FLOAT_TYPE_t previous_correlations_avg,
                                   FLOAT_TYPE_t correlation_deviation): 
         cdef:
-            FLOAT_TYPE_t rel_drop_threshold = 0.3
-            FLOAT_TYPE_t abs_drop_threshold = 0.15#max(correlation_deviation, 0.15)
-            FLOAT_TYPE_t corr_confirm_thresh = self.correlation_target#max(self.correlation_target, 0.5)  # порог для подтверждающих кадров
+            FLOAT_TYPE_t rel_drop_threshold = 0.35
+            FLOAT_TYPE_t abs_drop_threshold = max(0.15, correlation_deviation)
+            FLOAT_TYPE_t corr_confirm_thresh = self.correlation_target
             int min_confirm_frames = 3
-            int max_recovery_frames = 10
+            int max_recovery_frames = 8
             FLOAT_TYPE_t prev_safe
             FLOAT_TYPE_t absolute_drop
             FLOAT_TYPE_t relative_drop
@@ -568,58 +557,80 @@ cdef class FastMosseTracker:
         absolute_drop = prev_safe - current_max_correlation
         relative_drop = absolute_drop / prev_safe if prev_safe > 0 else 1.0
 
-        # --- режим подтверждения восстановления ---
+        # --- Состояние: идёт подтверждение кандидата ---
         if self.is_tracking_recovered:
-            # если корреляция резко упала — отменяем попытку
-            if current_max_correlation < 0.3:#self.correlation_target * 0.9:
+            if current_max_correlation < self.correlation_target * 0.7:
+                # кандидат оказался плохим — отменяем
                 self.is_tracking_recovered = False
                 self.frame_count_from_last_recovery = 0
+                self.confirm_buf.clear()
                 return
 
-            # Требуем несколько подряд кадров с хорошей корреляцией
+            # копим подтверждения
             if current_max_correlation >= corr_confirm_thresh:
-                self.frame_count_from_last_recovery += 1
+                self.confirm_buf.append(1)
             else:
-                # если кадр слабее — сбрасываем счётчик подтверждения
-                self.frame_count_from_last_recovery = 0
+                self.confirm_buf.append(0)
 
-            # Подтверждение восстановления
-            if self.frame_count_from_last_recovery >= min_confirm_frames:
-                self.frame_count_from_last_recovery = 0
-                self.is_tracking_recovered = False
+            # если подтверждений хватает
+            if sum(self.confirm_buf) >= min_confirm_frames:
                 self.is_tracking = True
+                self.is_tracking_recovered = False
+                self.frame_count_from_last_recovery = 0
                 self.low_correlation_frame_count = 0
+                self.confirm_buf.clear()
                 return
 
-            # если подтверждение не удаётся долго — откатываемся
+            # если слишком долго подтверждаем — сбрасываем
+            self.frame_count_from_last_recovery += 1
             if self.frame_count_from_last_recovery > max_recovery_frames:
-                self.frame_count_from_last_recovery = 0
                 self.is_tracking_recovered = False
-                self.is_tracking = False
+                self.frame_count_from_last_recovery = 0
+                self.confirm_buf.clear()
             return
 
-        # --- нормальная работа (не в подтверждении) ---
+        # --- Состояние: нормальный трекинг ---
         if self.is_tracking:
-            # накапливаем плохие кадры
-            if current_max_correlation < 0.3:#self.correlation_target * 0.9:
+            if current_max_correlation < self.correlation_target * 0.7:
                 self.low_correlation_frame_count += 1
             else:
                 self.low_correlation_frame_count = max(0, self.low_correlation_frame_count - 1)
 
-            #print("abs drop", absolute_drop, abs_drop_threshold)
-            #print("relative drop",relative_drop, rel_drop_threshold)
-            # переход в режим подтверждения/потери:
+            # проверка на потерю
             if (self.low_correlation_frame_count > self.low_correlation_frame_count_max or
-                ((absolute_drop > abs_drop_threshold) and (relative_drop > rel_drop_threshold) and current_max_correlation < self.correlation_target)):
+                ((absolute_drop > abs_drop_threshold) and 
+                (relative_drop > rel_drop_threshold) and 
+                current_max_correlation < self.correlation_target)):
 
-                new_point, best_roi, current_max_correlation, new_template_scale, correlation_map, preprocessed_template_f = self._multi_scale_detection(im, self.predicted_global_point, scales=self.expanded_scale_factors)
+                # пытаемся найти заново
+                new_point, best_roi, current_max_correlation, new_template_scale, correlation_map, preprocessed_template_f = self._multi_scale_detection(
+                    im, self.predicted_global_point, scales=self.expanded_scale_factors)
+
                 if current_max_correlation >= self.correlation_target:
+                    print("Tracker is unstable. Using predicted point")
+                    self.current_point = new_point
+                    self.current_global_point = self.predicted_global_point
+                    # нашли сразу уверенно — трекинг продолжается
                     return
 
+                # нашли кандидата — включаем подтверждение
                 self.is_tracking = False
-                self.is_tracking_recovered = True   # начинаем подтверждение восстановления
+                self.is_tracking_recovered = True
                 self.frame_count_from_last_recovery = 0
                 self.low_correlation_frame_count = 0
+                self.confirm_buf.clear()
+            return
+
+        # --- Состояние: полностью потерян (ищем кандидата) ---
+        if not self.is_tracking and not self.is_tracking_recovered:
+            new_point, best_roi, current_max_correlation, new_template_scale, correlation_map, preprocessed_template_f = self._multi_scale_detection(
+                im, self.predicted_global_point, scales=self.expanded_scale_factors)
+
+            if current_max_correlation >= self.correlation_target:
+                # нашли кандидата
+                self.is_tracking_recovered = True
+                self.frame_count_from_last_recovery = 0
+                self.confirm_buf.clear()
 
 
     cpdef FLOAT_TYPE_t _calculate_correlation_deviation(self):

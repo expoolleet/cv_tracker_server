@@ -6,8 +6,9 @@ import numpy as np
 import struct
 import queue
 import multiprocessing as mp
-from src.frame_memory_share_handler import FrameMemoryShareHandler, FrameMemoryShareClient
+from pathlib import Path
 
+from src.frame_memory_share_handler import FrameMemoryShareHandler, FrameMemoryShareClient
 from src.event import subscribe
 from src.event_types import (
     UPDATE_TRACKING, 
@@ -32,11 +33,16 @@ from src.fps_counter import FPSCounter
 from src.screen_stream import start_ffmpeg_screen_stream, stop_ffmpeg_procces, stream_height, stream_width, stream_lock
 from src.pipeline import WrapperPipeline
 from src.ui_draw import draw_crosshair, draw_roi
+from src.data_handler import CSVHandler
+from src.video_writer import VideoWriter
 from tracker.fast_mosse_tracker import FastMosseTracker
 
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''
 os.environ['QT_QPA_PLATFORM'] = 'eglfs'
 
+base_path = Path(__file__).resolve().parent / "debug"
+Path.mkdir(base_path, parents=True, exist_ok=True)
+base_path = str(base_path)
 
 class Tracker:
     MOSSE = "MOSSE"
@@ -50,23 +56,27 @@ camera_preview_lock = threading.Lock()
 camera_preview_clients = {}
 frame_top_border, frame_bottom_border, frame_left_border, frame_right_border = (25, 5, 0, 0)
 message_queue = mp.Queue()
-#event = threading.Event() 
+
 
 KEEP_ASPECT_RATIO = "keep_aspect_ratio"
 FREE_ASPECT_RATIO = "free_aspect_ratio"
 
+### functionality
 enable_uart = True
-
 enable_preview = True
+enable_debug = True
+enable_streaming_screen = False
+###
 
 tracker_requested = False
 
-is_streaming_screen = False
-if is_streaming_screen:
+
+if enable_streaming_screen:
     start_ffmpeg_screen_stream()
     
 latest_frame_lock = threading.Lock()
 latest_frame = None
+preview_frame = None
 
 camera_frame_rate = 60
 camera_frame_time = 1 / camera_frame_rate
@@ -74,7 +84,7 @@ camera_size_main = (640, 480)
 camera_size_lores = camera_size_main#(448, 360)
 camera_restart_timeout = 5
 
-camera_preview_frame_rate = 24
+camera_preview_frame_rate = 30
 camera_preview_frame_time_ms = mp.Value('i', int(1000 / camera_preview_frame_rate))
 
 ### Tracker default parameters ###
@@ -84,7 +94,6 @@ manager = mp.Manager()
 data_dict = manager.dict()
 tracker_dict = manager.dict()
 
-#№tracker = None
 data_dict["tracker_initialized"] = False
 tracker_size = camera_size_lores
 tracking_frame_size = camera_size_lores
@@ -125,9 +134,6 @@ def reset_camera():
     cam.start()
 
 reset_camera()
-# cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
-# cam.set_controls({"AeEnable": True})
-# cam.start()
 controls = cam.capture_metadata()
 print(f"Current exposition time: {controls['ExposureTime']} мкс")
 print(f"Current analogue gain: {controls['AnalogueGain']}")
@@ -136,7 +142,7 @@ print(f"Current digital gain: {controls['DigitalGain']}")
 frame_shape = (int(camera_size_lores[1] * 1.5), camera_size_lores[0])
 frame_dtype = np.uint8
 
-stop_event = mp.Event()
+play_preview_event = mp.Event()
 exit_event = mp.Event()
 wait_first_frame_event = mp.Event()
 is_camera_closed_event = mp.Event()
@@ -150,13 +156,14 @@ def reset_roi():
     data_dict["current_roi"] = (int(tracker_size[0] // 2 - current_roi_size // 2), int(tracker_size[1] // 2 - current_roi_size // 2), current_roi_size, current_roi_size)
 
 
+def sleep(start_time, time_s):
+    elapsed_time = time.time() - start_time
+    sleep_time = max(0, time_s - elapsed_time)
+    time.sleep(sleep_time)
+    return time.time()
+
 # https://docs.python.org/3/library/struct.html
-def prepare_uart_data(data_to_send):
-    data = data_to_send.copy()
-    dx = tracker_size[0] // 2 - (data_dict["current_roi"][0] + data_dict["current_roi"][2] // 2)
-    dy = tracker_size[1] // 2 - (data_dict["current_roi"][1] + data_dict["current_roi"][3] // 2)  
-    data.append(dx)
-    data.append(dy)
+def prepare_uart_data(data):
     data = np.clip(data, -128, 127)
     format_string = '<' + 'b' * len(data)
     return struct.pack(format_string, *data)   
@@ -189,6 +196,8 @@ def update_tracking(data):
         tracker_dict["max_corr"] = float(data["max_corr"])
         tracker_dict["sigma_factor"] = float(data["sigma_factor"])
         data_dict["tracker_requested"] = True
+    data_dict["tracker_data"] = {"roi": data_dict["current_roi"], "correlation": 0, "template_scale": 0, "learning_rate": 0, "correlation_target": 0, "fps": 0}
+    server.send_command_to_clients(Command.TRACKER_DATA, data_dict["tracker_data"])
     print(f'Update tracking with ROI: {data_dict["current_roi"]}, Kalman: {data["kalman"]}, Skip frames: {data["skip_frames"]}, Training images count: {data["training_images_count"]}, Alpha smoothing: {data["alpha_smoothing"]}, Max corr: {data["max_corr"]}, Sigma factor: {data["sigma_factor"]}')
     
 
@@ -214,7 +223,7 @@ def stop_stream_for_client(ip):
     print(f"Stream for {ip} is stoped")
             
                
-def show_camera_preview_by_client(data, stop_event):
+def show_camera_preview_by_client(data, play_preview_event):
     global camera_preview_thread, camera_preview_clients, camera_preview_frame_rate
     if not isinstance(data["frame_rate"], int):
         print(f"Wrong data for frame_rate! ({data['frame_rate']})")
@@ -225,46 +234,46 @@ def show_camera_preview_by_client(data, stop_event):
     camera_preview_frame_time_ms.value = frame_time_ms
     camera_preview_clients[data["ip"]] = True
     
-    if stop_event.is_set():
+    if play_preview_event.is_set():
         print("Camera preview is already running")
         return
-    stop_event.set()
+    play_preview_event.set()
     if camera_preview_thread is not None:
         print("Camera preview thread is already running")
         return
     
-    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(stop_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
+    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
     print(f"Camera preview is starting by {data['ip']}")
     camera_preview_thread.start()
 
 
-def show_camera_preview(frame_rate, stop_event):
+def show_camera_preview(frame_rate, play_preview_event):
     global camera_preview_thread
-    if stop_event.is_set():
+    if play_preview_event.is_set():
         print("Camera preview is already running")
         return
-    stop_event.set()
+    play_preview_event.set()
     if camera_preview_thread is not None:
         print("Camera preview was resumed")
         return
     
     frame_time_ms = int(1000 / frame_rate)
-    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(stop_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
+    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
     camera_preview_thread.start()
     print("Camera preview was started")
     
     
-def stop_camera_preview_by_client(ip, stop_event):
+def stop_camera_preview_by_client(ip, play_preview_event):
     global camera_preview_thread, camera_preview_clients
     if ip in camera_preview_clients:
         del camera_preview_clients[ip]
     if not camera_preview_clients:
-        stop_event.clear()
+        play_preview_event.clear()
         print(f"Camera preview is stopped by client ({ip})")
 
 
-def stop_camera_preview(stop_event):
-    stop_event.clear()
+def stop_camera_preview(play_preview_event):
+    play_preview_event.clear()
     print("Camera preview was stopped")
 
 
@@ -305,17 +314,27 @@ def change_roi_from_uart(value):
     current_roi_size = min_size + steps * step
     print(current_roi_size)
     reset_roi()
+    
+    
+def write_video(exit_event, fps):
+    frame_time = 1 / fps
+    with VideoWriter(path=base_path, fps=fps) as vw:
+        while data_dict["tracker_initialized"] and not exit_event.is_set():
+            vw.write(preview_frame)
+            time.sleep(frame_time)     
 
 
-def _camera_preview_loop(stop_event, exit_event, is_camera_closed_event, shared_memory_name, frame_shape, frame_dtype, frame_time_ms):
+def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event, shared_memory_name, frame_shape, frame_dtype, frame_time_ms):
+    global preview_frame
     try:
         cv2.namedWindow(window_name, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_NORMAL)
         cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
         no_frame_image = cv2.putText(np.zeros((480, 640)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
         print("Camera preview loop is started")
+        
+        video_writer = None
         while not exit_event.is_set():
-            stop_event.wait()
             frame_time_ms = camera_preview_frame_time_ms.value
             
             if not is_camera_closed_event.is_set():
@@ -330,14 +349,25 @@ def _camera_preview_loop(stop_event, exit_event, is_camera_closed_event, shared_
                     frame = processed_data[0]
                 else:
                     frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
-            frame = cv2.copyMakeBorder(frame, frame_top_border, frame_bottom_border, frame_left_border, frame_right_border, None, value = 0)
-            try:
-                cv2.imshow(window_name, frame)
-                cv2.waitKey(frame_time_ms)
-            except Exception as e:
-                print("cv2.imshow error:", e)
-                break
+
+            preview_frame = frame
+            if enable_debug:
+                tracker_initialized = data_dict.get("tracker_initialized", False)
+                if video_writer is None and tracker_initialized:
+                    video_writer = threading.Thread(target=write_video, args=(exit_event, camera_preview_frame_rate // 2,))
+                    video_writer.start()
+                elif video_writer is not None and not tracker_initialized:
+                    video_writer = None
+            
+            if play_preview_event.is_set():
+                frame = cv2.copyMakeBorder(frame, frame_top_border, frame_bottom_border, frame_left_border, frame_right_border, None, value = 0)
+                try:
+                    cv2.imshow(window_name, frame)
+                except Exception as e:
+                    print("cv2.imshow error:", e)
+                    break
             process_message_queue()
+            cv2.waitKey(frame_time_ms)
     except Exception as e:
         print(f"Camera preview loop error: {e}")
     finally:
@@ -433,19 +463,11 @@ def get_tracker():
                                 correlation_target=tracker_dict["max_corr"], 
                                 output_sigma_factor=tracker_dict["sigma_factor"])
 
-
-
-
-# def capture_frame(resolution="lores"):
-#     got_frame_event.set()
-#     frame = cam.capture_array(resolution)
-#     got_frame_event.clear()
-#     return frame
-def capture_frame(resolution="lores", timeout=0.5):
+def capture_frame(resolution="lores", timeout=1):
     global cam
-    job = cam.capture_request(wait=False)  # получаем Job
+    job = cam.capture_request(wait=False)
     try:
-        request = cam.wait(job, timeout=timeout)  # Ждём его завершения
+        request = cam.wait(job, timeout=timeout)
         frame = request.make_array(resolution)
         request.release()
         if is_camera_closed_event.is_set():
@@ -468,6 +490,11 @@ def reset_server_state():
     main_loop_event.clear()
     reset_roi()
 
+def get_xy_deviations():
+    dx = tracker_size[0] // 2 - (data_dict["current_roi"][0] + data_dict["current_roi"][2] // 2)
+    dy = tracker_size[1] // 2 - (data_dict["current_roi"][1] + data_dict["current_roi"][3] // 2)
+    return dx, dy  
+
 
 def main(frame_shared_memory_handler, shared_memory_name):
     print("Server is started.\n")
@@ -487,7 +514,7 @@ def main(frame_shared_memory_handler, shared_memory_name):
         print('\nClosing serial port...')
         close_serial()
         print('\nClosing camera preview if was enabled...')
-        stop_event.set()
+        play_preview_event.clear()
         exit_event.set()
         frame_shared_memory_handler.close()
         manager.shutdown()
@@ -500,7 +527,11 @@ def start_main_loop(shared_memory_name):
     try:
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
         wait_in_seconds_to_send_tracker_data = 0.3
-        start_timer_tracker_data = time.time()
+        start_timer_tracker_data = time.time()   
+        data_handler = None         
+        xy_deviations = []
+        target_frametime = camera_frame_time
+        start_time = time.time()
         print("Main loop is started.\n")
         while not main_loop_event.is_set(): 
             frame = capture_frame()
@@ -522,13 +553,24 @@ def start_main_loop(shared_memory_name):
                 else:        
                     tracker_data["roi"] = ROI_ZEROS  
                     server.send_command_to_clients(Command.TRACKER_DATA, tracker_data)
-                    
-            if enable_uart:   
-                packet = prepare_uart_data(uart_coefs)
+            dx, dy = get_xy_deviations()
+            if enable_debug:
+                if tracker_initialized:
+                    xy_deviations.append([dx, dy])
+                    if data_handler is None:
+                        data_handler = CSVHandler(base_path)
+                if not tracker_initialized and data_handler is not None:
+                    data_handler.save({"fields": ["dx", "dy"], "rows": np.clip(xy_deviations, -128, 127)})
+                    xy_deviations.clear()
+                    data_handler = None
+            if enable_uart:
+                packet = prepare_uart_data([*uart_coefs, dx, dy])
                 with uart_lock:   
                     serial_transmit_binary(packet)
             if not wait_first_frame_event.is_set():
                 wait_first_frame_event.set()
+                
+            start_time = sleep(start_time, target_frametime)
     except KeyboardInterrupt:
         print("KeyboardInterrupt detected. Exiting main loop...")
         raise
@@ -545,7 +587,6 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
     wait_first_frame_event.wait()
     sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
     fps_counter = FPSCounter()      
-
     try:
         start_time = time.time()
         while not exit_event.is_set():
@@ -580,10 +621,7 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
                     td = tracker.get_tracker_data()
                     td["fps"] = int(fps)
                     data_dict["tracker_data"] = td
-            elapsed_time = time.time() - start_time
-            sleep_time = max(0, target_frametime - elapsed_time)
-            time.sleep(sleep_time)
-            start_time = time.time()
+            start_time = sleep(start_time, target_frametime)
     except Exception as e:
         print(f"Exception occured in tracking process: {e}")
     finally:
@@ -603,8 +641,8 @@ if __name__ == "__main__":
     subscribe(STOP_STREAM_FOR_CLIENT, stop_stream_for_client)
     subscribe(SEND_CFS, set_uart_coefs)
     subscribe(REQUEST_TRACKING, request_tracking_server)
-    subscribe(SHOW_CAMERA_PREVIEW, lambda data: show_camera_preview_by_client(data, stop_event))
-    subscribe(STOP_CAMERA_PREVIEW, lambda ip: stop_camera_preview_by_client(ip, stop_event))
+    subscribe(SHOW_CAMERA_PREVIEW, lambda data: show_camera_preview_by_client(data, play_preview_event))
+    subscribe(STOP_CAMERA_PREVIEW, lambda ip: stop_camera_preview_by_client(ip, play_preview_event))
     subscribe(TOGGLE_ROI, toggle_roi)
     subscribe(TOGGLE_CROSSHAIR, toggle_crosshair)
     subscribe(CHANGE_FRAME_BORDERS, change_frame_borders)
@@ -619,7 +657,7 @@ if __name__ == "__main__":
         
     if enable_preview:
         print("Starting camera preview...")
-        show_camera_preview(frame_rate=camera_preview_frame_rate, stop_event=stop_event)
+        show_camera_preview(frame_rate=camera_preview_frame_rate, play_preview_event=play_preview_event)
 
     tracking_process = mp.Process(target=tracking, args=(sm_name, frame_shape, frame_dtype, data_dict, camera_frame_time, wait_first_frame_event, exit_event,))
     tracking_process.start()

@@ -30,11 +30,13 @@ def open_serial():
         print("Serial port is already opened.")
          
 def close_serial():
+    global is_uart_closed
+    is_uart_closed = True
     if ser.is_open:
         ser.close()
             
 def serial_receive_loop():
-    while True:
+    while not is_uart_closed:
         try:
             data_bytes = ser.readline() 
             if not data_bytes:
@@ -54,11 +56,12 @@ def serial_receive_loop():
                 post_event(CHANGE_ROI_FROM_UART, decoded_value)
                 #print("Decoded int value:", decoded_value)
         except serial.SerialException as e:
-            print(f"Error occured in serial receive loop: {e}\nTrying to reopen serial port...")
-            ser.close()
-            time.sleep(2)
-            ser.open()
-            print("Serial port is reopened.")    
+            if not is_uart_closed:
+                print(f"Error occured in serial receive loop: {e}\nTrying to reopen serial port...")
+                ser.close()
+                time.sleep(2)
+                ser.open()
+                print("Serial port is reopened.")    
         except UnicodeDecodeError:
             pass
             #print(f"Warning: Error when decoding data with utf-8 sent by serial: {data_bytes!r}")
@@ -74,6 +77,7 @@ ser.timeout = 0.5
 ser.bytesize = serial.EIGHTBITS
 ser.parity = serial.PARITY_NONE
 ser.stopbits = 1
+is_uart_closed = False
 # if not ser.is_open:
 #     ser.open()
 # print("Serial port is opened.")
