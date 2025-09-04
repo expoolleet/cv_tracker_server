@@ -11,7 +11,7 @@ from tracker.image_preprocessing_module import image_preprocessing
 
 from tracker.synthetic_target import make_synthetic_with_regularization 
 from tracker.kalman_filter import KalmanFilter
-from tracker.xor_tracker import XORTracker
+from tracker.xor_tracker import XORTracker, image_half
 
 COMPLEX_TYPE = np.complex64
 complex_type_name = "complex64"
@@ -52,6 +52,8 @@ cdef class FastMosseTracker:
         FLOAT_TYPE_t multi_scale_detection_good_correlation
         FLOAT_TYPE_t high_correlation_threshold
         FLOAT_TYPE_t correlation_deviation
+        FLOAT_TYPE_t max_apce
+        FLOAT_TYPE_t max_learning_rate
 
         np.ndarray current_weight
         np.ndarray current_energy
@@ -101,6 +103,7 @@ cdef class FastMosseTracker:
         int xort_rescale_type
         int update_xor_tracker_every_n_frames
         int correlation_history_max_capacity
+        int max_image_intensity
 
         object predict
         object fft_object
@@ -115,6 +118,7 @@ cdef class FastMosseTracker:
 
     def __cinit__(self, 
                 kalman: KalmanFilter=None,
+                xort: XORTracker=None,
                 FLOAT_TYPE_t alpha_kalman_rate=1/30, 
                 bool skip_frames=False, 
                 int max_skipped_frames=1, 
@@ -126,7 +130,11 @@ cdef class FastMosseTracker:
                 tuple rotation_range=(-3, 3),
                 tuple scale_range=(0.95, 1.05),
                 list scale_factors=[0.7, 0.85, 1.0],   
-                bool is_recovery_enabled=True):
+                bool is_recovery_enabled=True,
+                int update_xor_tracker_every_n_frames=3,
+                int xort_rescale=2,
+                list search_strategies=[],
+                int tracking_lost_max_attempts=12):
         
         self.is_debugging = debug
         self.current_roi = (0, 0, 0, 0)
@@ -148,25 +156,26 @@ cdef class FastMosseTracker:
         self.correlation_history_max_capacity = 5
         self.correlation_history = []
         self.frame_count = -1
+        self.max_apce = 50
+        self.max_learning_rate = 0.2
+        self.max_image_intensity = 245
 
         ## Kalman Filter
-        if kalman is None:
-            self.kalman = KalmanFilter(self.kalman_rate)
-        else:
-            self.kalman = kalman
+        self.kalman = kalman if kalman else KalmanFilter(self.kalman_rate)
         self.predict = self.kalman.cv2_predict
         self.kalman_rate = alpha_kalman_rate
         
         ## Tracking
         self.is_tracking = False
-        self.tracking_lost_max_attempts = 12
+        self.tracking_lost_max_attempts = tracking_lost_max_attempts
         self.tracking_lost_current_attempt = 0
-        self.d_max = 15
+        self.d_max = 5
         self.low_correlation_frame_count = 0
         self.low_correlation_frame_count_max = 5
         self.high_correlation_threshold = 0.9
         self.correlation_deviation = 0
-              
+
+       
         ## Multiscale detection
         self.scale_factors = scale_factors
         self.expanded_scale_factors = list((*scale_factors, 1.15, 1.3))
@@ -188,7 +197,7 @@ cdef class FastMosseTracker:
     
         # Recovery
         self.is_recovery_enabled = is_recovery_enabled
-        self.tracker_bank_max_count = 10
+        self.tracker_bank_max_count = 6
         self.tracker_bank = []
         self.frame_count_from_last_recovery = 0
         self.is_tracking_recovered = False
@@ -209,18 +218,20 @@ cdef class FastMosseTracker:
         self.num_pyfftw_threads = 0
         
         # XOR Tracker
-        self.xort = XORTracker()
-        self.xort_rescale = 2
-        self.xort_rescale_type = cv2.INTER_NEAREST
+        self.xort = xort if xort else XORTracker()
+        self.xort_rescale = xort_rescale
+        self.xort_rescale_type = cv2.INTER_NEAREST#cv2.INTER_AREA
         self.confirm_buf = deque(maxlen=5)
-        self.update_xor_tracker_every_n_frames = 3
-        self.search_strategies = [
-            (10, lambda im: (int(im.shape[1] * 0.85), int(im.shape[0] * 0.85))),
-            (8,  lambda im: (int(im.shape[1] * 0.7),  int(im.shape[0] * 0.7))),
-            (6,  lambda im: (im.shape[1] // 2,        int(im.shape[0] * 0.85))),
-            (4,  lambda im: (int(im.shape[1] * 0.85), im.shape[0] // 2)),
-            (2,  lambda im: (im.shape[1] // 2,        im.shape[0] // 2)),
-            (0,  lambda im: (im.shape[1] // 3,        im.shape[0] // 3)),
+        self.update_xor_tracker_every_n_frames = update_xor_tracker_every_n_frames
+        
+        cdef int search_step = 2
+        self.search_strategies = search_strategies if search_strategies else [
+            (5*search_step,  lambda im: (int(im.shape[1] * 0.85), int(im.shape[0] * 0.85))),
+            (4*search_step,  lambda im: (int(im.shape[1] * 0.7),  int(im.shape[0] * 0.7))),
+            (3*search_step,  lambda im: (im.shape[1] // 2,        int(im.shape[0] * 0.85))),
+            (2*search_step,  lambda im: (int(im.shape[1] * 0.85), im.shape[0] // 2)),
+            (1*search_step,  lambda im: (im.shape[1] // 2,        im.shape[0] // 2)),
+            (0*search_step,  lambda im: (im.shape[1] // 3,        im.shape[0] // 3)),
         ]
 
         # Debug
@@ -325,6 +336,10 @@ cdef class FastMosseTracker:
             FLOAT_TYPE_t new_template_scale, apce, current_max_correlation
             bool is_xor_tracking_good = False, is_xor_tracking_excellent = False
         
+
+        if self.get_image_intensity(template) > self.max_image_intensity:
+            return False, self.current_roi, self.debug
+
         self.frame_count += 1 
 
         if self.skip_frames:
@@ -349,7 +364,7 @@ cdef class FastMosseTracker:
                 return self.is_tracking, self.current_roi, self.debug
             else:
                 self.skipped_frame_count = 0
-        
+
         if self.frame_count > self.default_scale_frame_count:  
             if self.current_skipped_frames_multiscale_detection < self.skip_multiscale_detection_frames:
                 self.current_skipped_frames_multiscale_detection += 1 
@@ -380,7 +395,7 @@ cdef class FastMosseTracker:
             target = self.centric_synthetic_target.copy()
         target_f = self._compute_fft(target)
         
-        if current_max_correlation > self.correlation_target:   
+        if current_max_correlation > self.correlation_target:
             self.current_weight = self.adaptive_rate * (target_f * preprocessed_template_f.conj()) + (1.0 - self.adaptive_rate) * self.current_weight
             self.current_energy = self.adaptive_rate * (preprocessed_template_f * preprocessed_template_f.conj() + self.epsilon) + (1.0 - self.adaptive_rate) * self.current_energy
             self.computed_filter = self.current_weight / (self.current_energy + self.epsilon)
@@ -390,6 +405,7 @@ cdef class FastMosseTracker:
         
             correlation_map = self._compute_ifft(self.computed_filter * preprocessed_template_f)
             apce = self._calculate_apce(correlation_map, template)
+
             self._update_adaptive_learning_rate(apce)
 
         cdef FLOAT_TYPE_t previous_correlations_avg
@@ -436,7 +452,6 @@ cdef class FastMosseTracker:
             for threshold, stategy in self.search_strategies:
                 if self.tracking_lost_current_attempt >= threshold:
                     x, y = stategy(im)
-                    print(float(x) / im.shape[1], float(y) / im.shape[0])
                     x, y, is_xor_tracking_good = self.target_search(im, x, y)
                     break
                 
@@ -485,6 +500,9 @@ cdef class FastMosseTracker:
         return data
 
 
+    cpdef int get_image_intensity(self, np.ndarray[np.uint8_t, ndim=2] im):
+        return int(im.sum() / im.size)
+
     cpdef void reset_filter_with_original_template(self):
         self.current_weight = self.centric_synthetic_target_f * self.init_template_f.conj()
         self.current_energy = self.init_template_f * self.init_template_f.conj()
@@ -498,13 +516,16 @@ cdef class FastMosseTracker:
     
 
     cpdef void init_xor_tracker(self, np.ndarray[np.uint8_t, ndim=2] im, tuple roi):
-        im = cv2.resize(im, (im.shape[1] // self.xort_rescale, im.shape[0] // self.xort_rescale), self.xort_rescale_type)
+        #im = cv2.resize(im, (im.shape[1] // self.xort_rescale, im.shape[0] // self.xort_rescale), self.xort_rescale_type)
+        im = image_half(im)
+        print(im.shape[0], im.shape[1])
         roi = (roi[0] // self.xort_rescale, roi[1] // self.xort_rescale, roi[2] // self.xort_rescale, roi[3] // self.xort_rescale)
         self.xort.init(im, roi)
 
 
     cpdef tuple target_search(self, np.ndarray[np.uint8_t, ndim=2] im, int width, int height):
-        im = cv2.resize(im, (im.shape[1] // self.xort_rescale, im.shape[0] // self.xort_rescale), self.xort_rescale_type)
+        #im = cv2.resize(im, (im.shape[1] // self.xort_rescale, im.shape[0] // self.xort_rescale), self.xort_rescale_type)
+        im = image_half(im)
         width /= self.xort_rescale
         height /= self.xort_rescale
         x, y, is_good = self.xort.target_search(im, width, height)
@@ -512,7 +533,8 @@ cdef class FastMosseTracker:
 
 
     cpdef void update_xor_tracker(self, np.ndarray[np.uint8_t, ndim=2] im, int x, int y):
-        im = cv2.resize(im, (im.shape[1] // self.xort_rescale, im.shape[0] // self.xort_rescale), self.xort_rescale_type)
+        #im = cv2.resize(im, (im.shape[1] // self.xort_rescale, im.shape[0] // self.xort_rescale), self.xort_rescale_type)
+        im = image_half(im)
         x /= self.xort_rescale
         y /= self.xort_rescale
         self.xort.update_shift_frame(im, x, y)
@@ -521,7 +543,8 @@ cdef class FastMosseTracker:
 
 
     cpdef void reset_xor_tracker(self, np.ndarray[np.uint8_t, ndim=2] im, tuple roi):
-        im = cv2.resize(im, (im.shape[1] // self.xort_rescale, im.shape[0] // self.xort_rescale), self.xort_rescale_type)
+        #im = cv2.resize(im, (im.shape[1] // self.xort_rescale, im.shape[0] // self.xort_rescale), self.xort_rescale_type)
+        im = image_half(im)
         roi = (roi[0] // self.xort_rescale, roi[1] // self.xort_rescale, roi[2] // self.xort_rescale, roi[3] // self.xort_rescale)
         self.xort.calculate_mask(im, roi)
 
@@ -535,7 +558,7 @@ cdef class FastMosseTracker:
             FLOAT_TYPE_t rel_drop_threshold = 0.35
             FLOAT_TYPE_t abs_drop_threshold = max(0.15, correlation_deviation)
             FLOAT_TYPE_t corr_confirm_thresh = self.correlation_target
-            int min_confirm_frames = 3
+            int min_confirm_frames = 4
             int max_recovery_frames = 8
             FLOAT_TYPE_t prev_safe
             FLOAT_TYPE_t absolute_drop
@@ -595,7 +618,6 @@ cdef class FastMosseTracker:
                     im, self.predicted_global_point, scales=self.expanded_scale_factors)
 
                 if current_max_correlation >= self.correlation_target:
-                    print("Tracker is unstable. Using predicted point")
                     self.current_point = new_point
                     self.current_global_point = self.predicted_global_point
                     return
@@ -670,25 +692,33 @@ cdef class FastMosseTracker:
         return (max_correlation - min_correlation)**2 / (np.sum((correlation_map - min_correlation)**2) / (h * w))
         
         
+    # cpdef void _update_adaptive_learning_rate(self, FLOAT_TYPE_t apce):
+    #     if apce > 50:
+    #         self.adaptive_rate = 0.15
+    #     elif apce > 40:
+    #         self.adaptive_rate = 0.125
+    #     elif apce > 30:
+    #         self.adaptive_rate = 0.1
+    #     elif apce > 25:
+    #         self.adaptive_rate = 0.065
+    #     elif apce > 20:
+    #         self.adaptive_rate = 0.0475
+    #     elif apce > 15:
+    #         self.adaptive_rate = 0.0275
+    #     elif apce > 10:
+    #         self.adaptive_rate = 0.0225
+    #     elif apce > 5:
+    #         self.adaptive_rate = 0.0175
+    #     else:
+    #         self.adaptive_rate = 0.001
+
+
     cpdef void _update_adaptive_learning_rate(self, FLOAT_TYPE_t apce):
-        if apce > 50:
-            self.adaptive_rate = 0.15
-        elif apce > 40:
-            self.adaptive_rate = 0.125
-        elif apce > 30:
-            self.adaptive_rate = 0.1
-        elif apce > 25:
-            self.adaptive_rate = 0.065
-        elif apce > 20:
-            self.adaptive_rate = 0.0475
-        elif apce > 15:
-            self.adaptive_rate = 0.0275
-        elif apce > 10:
-            self.adaptive_rate = 0.0225
-        elif apce > 5:
-            self.adaptive_rate = 0.0175
-        else:
-            self.adaptive_rate = 0.001
+        cdef:
+            FLOAT_TYPE_t clipped_apce
+        clipped_apce = min(apce, self.max_apce)
+        self.adaptive_rate = clipped_apce / self.max_apce * self.max_learning_rate
+        #self.adaptive_rate = max_rate * (clipped_apce / max_apce) ** 2
     
     
     cpdef void _smooth_current_point(self):        
