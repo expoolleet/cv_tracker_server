@@ -36,6 +36,7 @@ from src.ui_draw import draw_crosshair, draw_roi
 from src.data_handler import CSVHandler
 from src.video_writer import VideoWriter
 from tracker.fast_mosse_tracker import FastMosseTracker
+from tracker.xor_tracker import XORTracker
 
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''
 os.environ['QT_QPA_PLATFORM'] = 'eglfs'
@@ -68,8 +69,6 @@ enable_debug = True
 enable_streaming_screen = False
 ###
 
-tracker_requested = False
-
 
 if enable_streaming_screen:
     start_ffmpeg_screen_stream()
@@ -80,23 +79,24 @@ preview_frame = None
 
 camera_frame_rate = 60
 camera_frame_time = 1 / camera_frame_rate
-camera_size_main = (640, 480)
+camera_size_main = (640, 480)#(960, 720)
 camera_size_lores = camera_size_main#(448, 360)
 camera_restart_timeout = 5
 
+video_writing_frame_rate = 30
 camera_preview_frame_rate = 30
 camera_preview_frame_time_ms = mp.Value('i', int(1000 / camera_preview_frame_rate))
-
-### Tracker default parameters ###
-#--------------------------------#
 
 manager = mp.Manager()
 data_dict = manager.dict()
 tracker_dict = manager.dict()
-
 data_dict["tracker_initialized"] = False
+data_dict["tracker_requested"] = False
 tracker_size = camera_size_lores
 tracking_frame_size = camera_size_lores
+
+### Tracker default parameters ###
+#--------------------------------#
 defualt_roi_size = 64
 current_roi_size = defualt_roi_size
 data_dict["current_roi"] = (int(tracker_size[0] // 2 - defualt_roi_size // 2), int(tracker_size[1] // 2 - defualt_roi_size // 2), defualt_roi_size, defualt_roi_size)
@@ -104,8 +104,20 @@ tracker_dict["max_skipped_frames"] = 1
 tracker_dict["using_kalman"] = False 
 tracker_dict["training_images_count"] = 9 
 tracker_dict["alpha_smoothing"] = 0.9
-tracker_dict["max_corr"] = 0.45
+tracker_dict["max_corr"] = 0.5
 tracker_dict["sigma_factor"] = 0.05
+
+# Searching 
+xort_x_shift = 20
+xort_y_shift = 15
+xort_corel_target_modificator = 0.2
+update_xor_tracker_every_n_frames = 3
+xort_rescale = 2
+search_strategies = [
+    (6,  lambda im: (im.shape[1] // 2, im.shape[0] // 2)),
+    (0,  lambda im: (im.shape[1] // 3, im.shape[0] // 3)),
+]
+tracking_lost_max_attempts = 12
 # ------------------------------#
 
 ROI_ZEROS = (0, 0, 0, 0)
@@ -130,8 +142,10 @@ def reset_camera():
     if cam is not None:
         cam.close()
     cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
+    print(cam.sensor_modes)
     cam.set_controls({"AeEnable": True})
     cam.start()
+    
 
 reset_camera()
 controls = cam.capture_metadata()
@@ -354,7 +368,7 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
             if enable_debug:
                 tracker_initialized = data_dict.get("tracker_initialized", False)
                 if video_writer is None and tracker_initialized:
-                    video_writer = threading.Thread(target=write_video, args=(exit_event, camera_preview_frame_rate // 2,))
+                    video_writer = threading.Thread(target=write_video, args=(exit_event, video_writing_frame_rate,))
                     video_writer.start()
                 elif video_writer is not None and not tracker_initialized:
                     video_writer = None
@@ -455,13 +469,19 @@ def request_tracking_server():
 def get_tracker():
     if current_tracker == Tracker.MOSSE:
         return cv2.legacy.TrackerMOSSE_create()
-    if current_tracker == Tracker.MK: 
-        return FastMosseTracker(skip_frames=tracker_dict["using_kalman"], 
+    if current_tracker == Tracker.MK:
+        xort = XORTracker(x_shift=xort_x_shift, y_shift=xort_y_shift, corel_target_modificator=xort_corel_target_modificator) 
+        return FastMosseTracker(xort = xort,
+                                skip_frames=tracker_dict["using_kalman"], 
                                 max_skipped_frames=tracker_dict["max_skipped_frames"], 
                                 training_images_count=tracker_dict["training_images_count"], 
                                 alpha_smoothing=tracker_dict["alpha_smoothing"], 
                                 correlation_target=tracker_dict["max_corr"], 
-                                output_sigma_factor=tracker_dict["sigma_factor"])
+                                output_sigma_factor=tracker_dict["sigma_factor"],
+                                update_xor_tracker_every_n_frames=update_xor_tracker_every_n_frames,
+                                xort_rescale=xort_rescale,
+                                search_strategies=search_strategies,
+                                tracking_lost_max_attempts=tracking_lost_max_attempts)
 
 def capture_frame(resolution="lores", timeout=1):
     global cam
@@ -483,12 +503,20 @@ def capture_frame(resolution="lores", timeout=1):
             time.sleep(camera_restart_timeout)
     return None
 
+def convert_frame_to_gray(frame):
+    if np.ndim(frame) == 2:
+        return cv2.cvtColor(frame, cv2.COLOR_YUV2GRAY_I420)
+    elif np.ndim(frame) == 3:
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    else:
+        return None
 
 def reset_server_state():
     data_dict["tracker_initialized"] = False
     data_dict["tracker_requested"] = False
     main_loop_event.clear()
     reset_roi()
+
 
 def get_xy_deviations():
     dx = tracker_size[0] // 2 - (data_dict["current_roi"][0] + data_dict["current_roi"][2] // 2)
@@ -593,7 +621,7 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
             tracker_requested = data_dict.get("tracker_requested", False)
             tracker_initialized = data_dict.get("tracker_initialized", False)
             current_roi = data_dict.get("current_roi", (0, 0, 0, 0))
-            frame = sm_client.get_frame()
+            frame = convert_frame_to_gray(sm_client.get_frame())
             
             with roi_lock:
                 if tracker_requested:
@@ -601,6 +629,7 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
                         
                         tracker = get_tracker()  
                         try:
+                            print(frame.shape)
                             tracker.init(frame, current_roi)
                             data_dict["tracker_initialized"] = True
                             data_dict["tracker_requested"] = False
