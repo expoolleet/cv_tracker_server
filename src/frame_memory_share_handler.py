@@ -16,8 +16,10 @@ class FrameMemoryShareHandler:
             print(f"Exception in FrameMemoryShareHandler occured: {exc_type}, {exc_val}")
         self.close()
         
-    def get_frame(self):
-        return self.frame_buffer.copy()
+    def get_frame(self, copying=True):
+        if copying:
+            return self.frame_buffer.copy()
+        return self.frame_buffer
     
     def set_frame(self, frame):
         np.copyto(self.frame_buffer, frame)
@@ -37,12 +39,12 @@ class FrameMemoryShareClient:
         self.frame_buffer = np.ndarray(shape, dtype=dtype,buffer=self.frame_sm.buf)
         self.lock = Lock()
         
-    def get_frame(self):
-        return self.frame_buffer.copy()
-        
+    def get_frame(self, copying=True):
+        if copying:
+            return self.frame_buffer.copy()
+        return self.frame_buffer    
     
     def set_frame(self, frame):
-        #with self.lock:
         np.copyto(self.frame_buffer, frame)
         
     def close(self):

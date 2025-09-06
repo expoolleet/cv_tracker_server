@@ -85,7 +85,6 @@ cdef class FastMosseTracker:
         int training_images_count
         int tracking_lost_max_attempts
         int tracking_lost_current_attempt
-        int d_max
         int default_scale_frame_count
         int skip_multiscale_detection_frames
         int current_skipped_frames_multiscale_detection
@@ -169,9 +168,8 @@ cdef class FastMosseTracker:
         self.is_tracking = False
         self.tracking_lost_max_attempts = tracking_lost_max_attempts
         self.tracking_lost_current_attempt = 0
-        self.d_max = 5
         self.low_correlation_frame_count = 0
-        self.low_correlation_frame_count_max = 5
+        self.low_correlation_frame_count_max = 6
         self.high_correlation_threshold = 0.9
         self.correlation_deviation = 0
 
@@ -290,7 +288,7 @@ cdef class FastMosseTracker:
         training_images = self._generate_training_images(template)
         weight = np.zeros((h, w), dtype=COMPLEX_TYPE)
         energy = np.zeros((h, w), dtype=COMPLEX_TYPE)
-        for i, image in enumerate(training_images):
+        for image in training_images:
             processed_image = self._process_template(image)
             preprocessed_image = image_preprocessing(processed_image)
             preprocessed_image_f = self._compute_fft(preprocessed_image)
@@ -384,15 +382,14 @@ cdef class FastMosseTracker:
         
         self.correlation_history.append(current_max_correlation)
 
-        dy = np.abs(self.current_point[0] - new_point[0])
-        dx = np.abs(self.current_point[1] - new_point[1])
-        if int(np.ceil(dy)) <= self.d_max and int(np.ceil(dx)) <= self.d_max:
-            self.current_point = new_point
-            target = make_synthetic_with_regularization(h, w, np.array([(self.current_point[0], self.current_point[1])], dtype=FLOAT_TYPE),
-            output_sigma_factor=self.output_sigma_factor)
-        else:
-            self.current_point = (self.template_size[0] // 2, self.template_size[1] // 2)
-            target = self.centric_synthetic_target.copy()
+        #dy = np.abs(self.current_point[0] - new_point[0])
+        #dx = np.abs(self.current_point[1] - new_point[1])
+        #if int(np.ceil(dy)) <= self.d_max and int(np.ceil(dx)) <= self.d_max:
+        self.current_point = new_point
+        target = make_synthetic_with_regularization(h, w, np.array([(self.current_point[0], self.current_point[1])], dtype=FLOAT_TYPE),output_sigma_factor=self.output_sigma_factor)
+        #else:
+        #    self.current_point = (self.template_size[0] // 2, self.template_size[1] // 2)
+        #    target = self.centric_synthetic_target.copy()
         target_f = self._compute_fft(target)
         
         if current_max_correlation > self.correlation_target:
@@ -558,7 +555,7 @@ cdef class FastMosseTracker:
             FLOAT_TYPE_t rel_drop_threshold = 0.35
             FLOAT_TYPE_t abs_drop_threshold = max(0.15, correlation_deviation)
             FLOAT_TYPE_t corr_confirm_thresh = self.correlation_target
-            int min_confirm_frames = 4
+            int min_confirm_frames = 3
             int max_recovery_frames = 8
             FLOAT_TYPE_t prev_safe
             FLOAT_TYPE_t absolute_drop

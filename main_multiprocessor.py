@@ -55,7 +55,7 @@ window_name = 'Fullscreen PiCamera2 Feed'
 camera_preview_thread = None
 camera_preview_lock = threading.Lock()
 camera_preview_clients = {}
-frame_top_border, frame_bottom_border, frame_left_border, frame_right_border = (25, 5, 0, 0)
+frame_top_border, frame_bottom_border, frame_left_border, frame_right_border = (0, 0, 0, 0)
 message_queue = mp.Queue()
 
 
@@ -65,7 +65,7 @@ FREE_ASPECT_RATIO = "free_aspect_ratio"
 ### functionality
 enable_uart = True
 enable_preview = True
-enable_debug = True
+enable_debug = False
 enable_streaming_screen = False
 ###
 
@@ -80,7 +80,8 @@ preview_frame = None
 camera_frame_rate = 60
 camera_frame_time = 1 / camera_frame_rate
 camera_size_main = (640, 480)#(960, 720)
-camera_size_lores = camera_size_main#(448, 360)
+camera_size_lores = (640, 480)#(448, 360)
+camera_size = camera_size_lores
 camera_restart_timeout = 5
 
 video_writing_frame_rate = 30
@@ -111,7 +112,8 @@ tracker_dict["sigma_factor"] = 0.05
 xort_x_shift = 20
 xort_y_shift = 15
 xort_corel_target_modificator = 0.2
-update_xor_tracker_every_n_frames = 3
+update_xor_tracker_every_n_frames = 5
+xort_mask_shift = 4
 xort_rescale = 2
 search_strategies = [
     (6,  lambda im: (im.shape[1] // 2, im.shape[0] // 2)),
@@ -153,7 +155,7 @@ print(f"Current exposition time: {controls['ExposureTime']} мкс")
 print(f"Current analogue gain: {controls['AnalogueGain']}")
 print(f"Current digital gain: {controls['DigitalGain']}")
 
-frame_shape = (int(camera_size_lores[1] * 1.5), camera_size_lores[0])
+frame_shape = (int(camera_size[1] * 1.5), camera_size[0])
 frame_dtype = np.uint8
 
 play_preview_event = mp.Event()
@@ -256,12 +258,12 @@ def show_camera_preview_by_client(data, play_preview_event):
         print("Camera preview thread is already running")
         return
     
-    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
+    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype))
     print(f"Camera preview is starting by {data['ip']}")
     camera_preview_thread.start()
 
 
-def show_camera_preview(frame_rate, play_preview_event):
+def show_camera_preview(play_preview_event):
     global camera_preview_thread
     if play_preview_event.is_set():
         print("Camera preview is already running")
@@ -271,8 +273,7 @@ def show_camera_preview(frame_rate, play_preview_event):
         print("Camera preview was resumed")
         return
     
-    frame_time_ms = int(1000 / frame_rate)
-    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, frame_time_ms))
+    camera_preview_thread = mp.Process(target=_camera_preview_loop, args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype))
     camera_preview_thread.start()
     print("Camera preview was started")
     
@@ -338,33 +339,38 @@ def write_video(exit_event, fps):
             time.sleep(frame_time)     
 
 
-def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event, shared_memory_name, frame_shape, frame_dtype, frame_time_ms):
+def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event, shared_memory_name, frame_shape, frame_dtype):
     global preview_frame
     try:
         cv2.namedWindow(window_name, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_NORMAL)
         cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
         no_frame_image = cv2.putText(np.zeros((480, 640)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
+        canvas_h = camera_size[1] + frame_top_border + frame_bottom_border
+        canvas_w = camera_size[0] + frame_left_border + frame_right_border
+        canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
         print("Camera preview loop is started")
         
         video_writer = None
         while not exit_event.is_set():
-            frame_time_ms = camera_preview_frame_time_ms.value
-            
+           
             if not is_camera_closed_event.is_set():
-                frame = sm_client.get_frame()
+                frame = sm_client.get_frame(False)
             else:
-                frame = no_frame_image
+                preview_frame = no_frame_image
             
             if not is_camera_closed_event.is_set():
                 if len(pipeline.active_pipeline_steps) > 0:
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
-                    processed_data = pipeline.process(rgb_frame, data_dict["current_roi"])
-                    frame = processed_data[0]
+                    #gray_frame = frame[:frame_shape[0], :].reshape((frame_shape[0], frame_shape[1]))
+                    preview_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                    processed_data = pipeline.process(preview_frame, data_dict["current_roi"])
+                    preview_frame = processed_data[0]
+                    #yuv_flat = frame.ravel()
+                    #yuv_flat[:frame_shape[0]*frame_shape[1]] = gray_frame.ravel()
+                    #frame = yuv_flat
                 else:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
-
-            preview_frame = frame
+                    preview_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                    
             if enable_debug:
                 tracker_initialized = data_dict.get("tracker_initialized", False)
                 if video_writer is None and tracker_initialized:
@@ -374,14 +380,18 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
                     video_writer = None
             
             if play_preview_event.is_set():
-                frame = cv2.copyMakeBorder(frame, frame_top_border, frame_bottom_border, frame_left_border, frame_right_border, None, value = 0)
+                #frame = cv2.copyMakeBorder(frame, frame_top_border, frame_bottom_border, frame_left_border, frame_right_border, None, value = 0)
+                canvas[
+                    frame_top_border:frame_top_border + preview_frame.shape[0],
+                    frame_left_border:frame_left_border + preview_frame.shape[1]
+                ] = preview_frame
                 try:
-                    cv2.imshow(window_name, frame)
+                    cv2.imshow(window_name, canvas)
                 except Exception as e:
                     print("cv2.imshow error:", e)
                     break
             process_message_queue()
-            cv2.waitKey(frame_time_ms)
+            cv2.waitKey(camera_preview_frame_time_ms.value)
     except Exception as e:
         print(f"Camera preview loop error: {e}")
     finally:
@@ -470,7 +480,7 @@ def get_tracker():
     if current_tracker == Tracker.MOSSE:
         return cv2.legacy.TrackerMOSSE_create()
     if current_tracker == Tracker.MK:
-        xort = XORTracker(x_shift=xort_x_shift, y_shift=xort_y_shift, corel_target_modificator=xort_corel_target_modificator) 
+        xort = XORTracker(x_shift=xort_x_shift, y_shift=xort_y_shift, corel_target_modificator=xort_corel_target_modificator, mask_shift=xort_mask_shift) 
         return FastMosseTracker(xort = xort,
                                 skip_frames=tracker_dict["using_kalman"], 
                                 max_skipped_frames=tracker_dict["max_skipped_frames"], 
@@ -686,7 +696,7 @@ if __name__ == "__main__":
         
     if enable_preview:
         print("Starting camera preview...")
-        show_camera_preview(frame_rate=camera_preview_frame_rate, play_preview_event=play_preview_event)
+        show_camera_preview(play_preview_event=play_preview_event)
 
     tracking_process = mp.Process(target=tracking, args=(sm_name, frame_shape, frame_dtype, data_dict, camera_frame_time, wait_first_frame_event, exit_event,))
     tracking_process.start()
