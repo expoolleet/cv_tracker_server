@@ -20,11 +20,24 @@ def draw_roi(args_list) -> np.ndarray:
     args_list = list(args_list)
     frame = args_list[0]
     roi = args_list[1]
-    if roi is None:
+    if not roi:
         return args_list
-    color = args_list[2] if len(args_list) > 2 else draw_color
     p1 = (int(roi[0]), int(roi[1]))
     p2 = (int(roi[0] + roi[2]), int(roi[1] + roi[3]))
-    cv2.rectangle(frame, p1, p2, color, line_thickness)
+    cv2.rectangle(frame, p1, p2, draw_color, line_thickness)
     args_list[0] = frame
     return args_list
+
+
+def draw_fps(args_list):
+    args_list = list(args_list)
+    frame = args_list[0]
+    fps_data = args_list[2]
+    if not fps_data:
+        return args_list
+    fps = fps_data[0]
+    point = fps_data[1]
+    cv2.putText(frame, str(fps), point, 2, 0.8, draw_color, 2)
+    args_list[0] = frame
+    return args_list
+    

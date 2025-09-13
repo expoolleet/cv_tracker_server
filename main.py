@@ -29,7 +29,7 @@ from src.uart_transmition import serial_transmit_binary, serial_receive_loop, op
 from src.fps_counter import FPSCounter
 from src.screen_stream import start_ffmpeg_screen_stream, stop_ffmpeg_procces, stream_height, stream_width, stream_lock
 from src.pipeline import WrapperPipeline
-from src.ui_draw import draw_crosshair, draw_roi
+from src.ui_draw import draw_crosshair, draw_roi, draw_fps
 from tracker.fast_mosse_tracker import FastMosseTracker
 
 os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''
@@ -103,6 +103,7 @@ server = Server(net_interface, server_port)
 pipeline = WrapperPipeline()
 pipeline.register_operation(draw_crosshair, draw_crosshair.__name__, default_enabled=True)
 pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=True)
+pipeline.register_operation(draw_fps, draw_fps.__name__, default_enabled=True)
 
 roi_lock = threading.Lock()
 

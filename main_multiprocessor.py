@@ -32,7 +32,7 @@ from src.uart_transmition import serial_transmit_binary, serial_receive_loop, op
 from src.fps_counter import FPSCounter
 from src.screen_stream import start_ffmpeg_screen_stream, stop_ffmpeg_procces, stream_height, stream_width, stream_lock
 from src.pipeline import WrapperPipeline
-from src.ui_draw import draw_crosshair, draw_roi
+from src.ui_draw import draw_crosshair, draw_roi, draw_fps
 from src.data_handler import CSVHandler
 from src.video_writer import VideoWriter
 from tracker.fast_mosse_tracker import FastMosseTracker
@@ -44,6 +44,11 @@ os.environ['QT_QPA_PLATFORM'] = 'eglfs'
 base_path = Path(__file__).resolve().parent / "debug"
 Path.mkdir(base_path, parents=True, exist_ok=True)
 base_path = str(base_path)
+
+
+class CameraResolution:
+    LORES = "lores"
+    MAIN = "main"
 
 class Tracker:
     MOSSE = "MOSSE"
@@ -80,12 +85,22 @@ preview_frame = None
 camera_frame_rate = 60
 camera_frame_time = 1 / camera_frame_rate
 camera_size_main = (640, 480)#(960, 720)
-camera_size_lores = (640, 480)#(448, 360)
-camera_size = camera_size_lores
+camera_size_lores = camera_size_main#(448, 360)
+
+camera_resolution = CameraResolution.LORES
+
+if camera_resolution == CameraResolution.MAIN:
+    camera_size = camera_size_main
+    frame_shape = (camera_size[1], camera_size[0], 3)
+else:
+    camera_size = camera_size_lores
+    frame_shape = (int(camera_size[1] * 1.5), camera_size[0])
+frame_dtype = np.uint8
+
 camera_restart_timeout = 5
 
-video_writing_frame_rate = 30
-camera_preview_frame_rate = 30
+camera_preview_frame_rate = 24
+video_writing_frame_rate = camera_preview_frame_rate
 camera_preview_frame_time_ms = mp.Value('i', int(1000 / camera_preview_frame_rate))
 
 manager = mp.Manager()
@@ -135,6 +150,7 @@ server = Server(net_interface, server_port)
 pipeline = WrapperPipeline()
 pipeline.register_operation(draw_crosshair, draw_crosshair.__name__, default_enabled=True)
 pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=True)
+pipeline.register_operation(draw_fps, draw_fps.__name__, default_enabled=True)
 
 roi_lock = mp.Lock()
 
@@ -143,7 +159,7 @@ def reset_camera():
     global cam
     if cam is not None:
         cam.close()
-    cam = setup_camera(main={"format": "BGR888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
+    cam = setup_camera(main={"format": "RGB888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
     print(cam.sensor_modes)
     cam.set_controls({"AeEnable": True})
     cam.start()
@@ -155,8 +171,6 @@ print(f"Current exposition time: {controls['ExposureTime']} мкс")
 print(f"Current analogue gain: {controls['AnalogueGain']}")
 print(f"Current digital gain: {controls['DigitalGain']}")
 
-frame_shape = (int(camera_size[1] * 1.5), camera_size[0])
-frame_dtype = np.uint8
 
 play_preview_event = mp.Event()
 exit_event = mp.Event()
@@ -165,8 +179,8 @@ is_camera_closed_event = mp.Event()
 got_frame_event = threading.Event()
 main_loop_event = threading.Event()
 
-
 current_tracker = Tracker.MK
+
 
 def reset_roi():
     data_dict["current_roi"] = (int(tracker_size[0] // 2 - current_roi_size // 2), int(tracker_size[1] // 2 - current_roi_size // 2), current_roi_size, current_roi_size)
@@ -177,6 +191,7 @@ def sleep(start_time, time_s):
     sleep_time = max(0, time_s - elapsed_time)
     time.sleep(sleep_time)
     return time.time()
+
 
 # https://docs.python.org/3/library/struct.html
 def prepare_uart_data(data):
@@ -216,7 +231,6 @@ def update_tracking(data):
     server.send_command_to_clients(Command.TRACKER_DATA, data_dict["tracker_data"])
     print(f'Update tracking with ROI: {data_dict["current_roi"]}, Kalman: {data["kalman"]}, Skip frames: {data["skip_frames"]}, Training images count: {data["training_images_count"]}, Alpha smoothing: {data["alpha_smoothing"]}, Max corr: {data["max_corr"]}, Sigma factor: {data["sigma_factor"]}')
     
-
         
 def start_stream_for_client(params):
     global stream_protocol, ffmpeg_port
@@ -319,8 +333,8 @@ def change_frame_borders(data):
         
 def change_roi_from_uart(value):
     global current_roi_size
-    a = 182
-    b = 1811
+    a = 0#182
+    b = 255#1811
     min_size = 32
     max_size = 128
     step = 4
@@ -346,9 +360,6 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
         cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
         no_frame_image = cv2.putText(np.zeros((480, 640)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
-        canvas_h = camera_size[1] + frame_top_border + frame_bottom_border
-        canvas_w = camera_size[0] + frame_left_border + frame_right_border
-        canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
         print("Camera preview loop is started")
         
         video_writer = None
@@ -362,14 +373,24 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
             if not is_camera_closed_event.is_set():
                 if len(pipeline.active_pipeline_steps) > 0:
                     #gray_frame = frame[:frame_shape[0], :].reshape((frame_shape[0], frame_shape[1]))
-                    preview_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
-                    processed_data = pipeline.process(preview_frame, data_dict["current_roi"])
+                    if camera_resolution == CameraResolution.LORES:
+                        preview_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                    else:
+                        preview_frame = frame.copy()
+                    current_roi = data_dict.get("current_roi", None)
+                    tracker_data = data_dict.get("tracker_data", {})
+                    
+                    fps_data = [tracker_data["fps"], (50, 50)] if "fps" in tracker_data else None
+                    processed_data = pipeline.process(preview_frame, current_roi, fps_data)
                     preview_frame = processed_data[0]
                     #yuv_flat = frame.ravel()
                     #yuv_flat[:frame_shape[0]*frame_shape[1]] = gray_frame.ravel()
                     #frame = yuv_flat
                 else:
-                    preview_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                    if camera_resolution == CameraResolution.LORES:
+                        preview_frame = cv2.cvtColor(frame, cv2.COLOR_YUV2BGR_I420)
+                    else:
+                        preview_frame = frame.copy()
                     
             if enable_debug:
                 tracker_initialized = data_dict.get("tracker_initialized", False)
@@ -380,13 +401,9 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
                     video_writer = None
             
             if play_preview_event.is_set():
-                #frame = cv2.copyMakeBorder(frame, frame_top_border, frame_bottom_border, frame_left_border, frame_right_border, None, value = 0)
-                canvas[
-                    frame_top_border:frame_top_border + preview_frame.shape[0],
-                    frame_left_border:frame_left_border + preview_frame.shape[1]
-                ] = preview_frame
+                canvas = cv2.copyMakeBorder(preview_frame, frame_top_border, frame_bottom_border, frame_left_border, frame_right_border, None, value = 0)
                 try:
-                    cv2.imshow(window_name, canvas)
+                    cv2.imshow(window_name, cv2.resize(canvas, (320, 240), cv2.INTER_LINEAR))
                 except Exception as e:
                     print("cv2.imshow error:", e)
                     break
@@ -397,8 +414,8 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
     finally:
         sm_client.close()
         cv2.destroyAllWindows()
- 
-    
+
+
 def stream(ffmpeg_hanlder, pipe, stream_size):
     try:
         while True:
@@ -493,6 +510,7 @@ def get_tracker():
                                 search_strategies=search_strategies,
                                 tracking_lost_max_attempts=tracking_lost_max_attempts)
 
+
 def capture_frame(resolution="lores", timeout=1):
     global cam
     job = cam.capture_request(wait=False)
@@ -513,13 +531,15 @@ def capture_frame(resolution="lores", timeout=1):
             time.sleep(camera_restart_timeout)
     return None
 
+
 def convert_frame_to_gray(frame):
     if np.ndim(frame) == 2:
         return cv2.cvtColor(frame, cv2.COLOR_YUV2GRAY_I420)
     elif np.ndim(frame) == 3:
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
     else:
         return None
+
 
 def reset_server_state():
     data_dict["tracker_initialized"] = False
@@ -572,7 +592,7 @@ def start_main_loop(shared_memory_name):
         start_time = time.time()
         print("Main loop is started.\n")
         while not main_loop_event.is_set(): 
-            frame = capture_frame()
+            frame = capture_frame(resolution=camera_resolution)
             if frame is None:
                 continue
             
@@ -667,7 +687,6 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
         sm_client.close()
                 
 
-   
 if __name__ == "__main__": 
     print("Starting tracking server...\n")
     
@@ -701,4 +720,3 @@ if __name__ == "__main__":
     tracking_process = mp.Process(target=tracking, args=(sm_name, frame_shape, frame_dtype, data_dict, camera_frame_time, wait_first_frame_event, exit_event,))
     tracking_process.start()
     main(frame_shared_memory_handler, sm_name)
-
