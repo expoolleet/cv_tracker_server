@@ -7,16 +7,16 @@ import asyncio
 
 from src.event import post_event
 from src.event_types import (
-    UPDATE_TRACKING, 
-    STOP_TRACKING, 
-    START_STREAM_FOR_CLIENT, 
-    STOP_STREAM_FOR_CLIENT, 
-    SEND_CFS, 
-    SHOW_CAMERA_PREVIEW, 
-    STOP_CAMERA_PREVIEW, 
-    TOGGLE_ROI, 
-    TOGGLE_CROSSHAIR, 
-    CHANGE_FRAME_BORDERS )
+    UPDATE_TRACKING_EVENT, 
+    STOP_TRACKING_EVENT, 
+    START_STREAM_FOR_CLIENT_EVENT, 
+    STOP_STREAM_FOR_CLIENT_EVENT, 
+    SEND_CFS_EVENT, 
+    SHOW_CAMERA_PREVIEW_EVENT, 
+    STOP_CAMERA_PREVIEW_EVENT, 
+    TOGGLE_ROI_EVENT, 
+    TOGGLE_CROSSHAIR_EVENT, 
+    CHANGE_FRAME_BORDERS_EVENT )
 from src.command import Command
 
 SOCKET_RECEIVE_BUFFER = 1024
@@ -82,7 +82,7 @@ class Server:
     def handle_message(self, message, client_addr):
         print(f"Client message {message}")
         if message["command"] == Command.START_STREAM:
-            post_event(START_STREAM_FOR_CLIENT, 
+            post_event(START_STREAM_FOR_CLIENT_EVENT, 
                        {
                             "ip": client_addr[0],
                             "stream_size": message["data"]["stream_size"],
@@ -90,27 +90,27 @@ class Server:
                             "frame_rate": message["data"]["frame_rate"]
                        })
         elif message["command"] == Command.STOP_STREAM:
-            post_event(STOP_STREAM_FOR_CLIENT, client_addr[0])
+            post_event(STOP_STREAM_FOR_CLIENT_EVENT, client_addr[0])
         elif message["command"] == Command.UPDATE_TRACKING:
-            post_event(UPDATE_TRACKING, message["data"])
+            post_event(UPDATE_TRACKING_EVENT, message["data"])
         elif message["command"] == Command.STOP_TRACKING:
-            post_event(STOP_TRACKING)
+            post_event(STOP_TRACKING_EVENT)
         elif message["command"] == Command.SEND_CFS:
-            post_event(SEND_CFS, message["data"])
+            post_event(SEND_CFS_EVENT, message["data"])
         elif message["command"] == Command.START_TRANSMISSION:
-            post_event(SHOW_CAMERA_PREVIEW,
+            post_event(SHOW_CAMERA_PREVIEW_EVENT,
                        {    
                             "ip": client_addr[0],
                             "frame_rate": message["data"]["frame_rate"]
                        })
         elif message["command"] == Command.STOP_TRANSMISSION:
-            post_event(STOP_CAMERA_PREVIEW, client_addr[0])
+            post_event(STOP_CAMERA_PREVIEW_EVENT, client_addr[0])
         elif message["command"] == Command.TOGGLE_ROI:
-            post_event(TOGGLE_ROI, message["data"])
+            post_event(TOGGLE_ROI_EVENT, message["data"])
         elif message["command"] == Command.TOGGLE_CROSSHAIR:
-            post_event(TOGGLE_CROSSHAIR, message["data"])
+            post_event(TOGGLE_CROSSHAIR_EVENT, message["data"])
         elif message["command"] == Command.CHANGE_FRAME_BORDERS:
-            post_event(CHANGE_FRAME_BORDERS, message["data"])
+            post_event(CHANGE_FRAME_BORDERS_EVENT, message["data"])
         elif message["command"] == Command.REBOOT_SERVER:
             self.reboot()
         else:
