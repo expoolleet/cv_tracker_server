@@ -1,4 +1,5 @@
 import os
+import signal
 import cv2
 import time
 import threading
@@ -9,7 +10,7 @@ import multiprocessing as mp
 from pathlib import Path
 
 from src.frame_memory_share_handler import FrameMemoryShareHandler, FrameMemoryShareClient
-from src.event import subscribe
+from src.event import subscribe, post_event
 from src.event_types import *
 from src.command import Command
 from src.zeroconf import register_zeroconf
@@ -20,9 +21,11 @@ from src.uart_transmition import serial_transmit_binary, serial_receive_loop, op
 from src.fps_counter import FPSCounter
 from src.screen_stream import start_ffmpeg_screen_stream, stop_ffmpeg_procces, stream_height, stream_width, stream_lock
 from src.pipeline import WrapperPipeline
-from src.ui_draw import draw_crosshair, draw_roi, draw_fps
+from src.ui_draw import draw_crosshair, draw_roi, draw_text
 from src.data_handler import CSVHandler
 from src.video_writer import VideoWriter
+from src.opengl_renderer import OpenGLRenderer, ProjectionViewModel
+from src.gpio import gpio_init, handle_gpio27_pin_state_loop, gpio_cleanup
 from tracker.fast_mosse_tracker import FastMosseTracker
 from tracker.xor_tracker import XORTracker
 
@@ -33,3 +36,16 @@ if os.getenv("DISPLAY") is None:
 base_path = Path(__file__).resolve().parent / "debug"
 Path.mkdir(base_path, parents=True, exist_ok=True)
 base_path = str(base_path)
+
+class CameraResolution:
+    LORES = "lores"
+    MAIN = "main"
+
+class Tracker:
+    MOSSE = "MOSSE"
+    MK = "MK"
+
+net_interface = "wlan0"
+
+KEEP_ASPECT_RATIO = "keep_aspect_ratio"
+FREE_ASPECT_RATIO = "free_aspect_ratio"

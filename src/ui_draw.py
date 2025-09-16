@@ -29,15 +29,16 @@ def draw_roi(args_list) -> np.ndarray:
     return args_list
 
 
-def draw_fps(args_list):
+def draw_text(args_list):
     args_list = list(args_list)
     frame = args_list[0]
-    fps_data = args_list[2]
-    if not fps_data:
+    text_data_list = args_list[2]
+    if not text_data_list:
         return args_list
-    fps = fps_data[0]
-    point = fps_data[1]
-    cv2.putText(frame, str(fps), point, 2, 0.8, draw_color, 2)
+    for text_data in text_data_list:
+        text = text_data[0]
+        point = text_data[1]
+        cv2.putText(frame, text, point, 2, 0.8, draw_color, 2)
     args_list[0] = frame
     return args_list
     

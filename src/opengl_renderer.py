@@ -9,19 +9,36 @@ import numpy as np
 def create_shader_module(shader_source_code, shader_type):
     return compileShader(shader_source_code, shader_type)
 
+clear_color = (0, 0, 0, 1)
 
-_yuv2rgb_vertex_code = """
+_vertex_code = """
     precision mediump float;
 
     attribute vec2 aPosition;
     attribute vec2 aTexCoord;
 
+    uniform mat4 model_view_projection;
+
     varying vec2 uv;
 
     void main() {
         uv = aTexCoord;
-        gl_Position = vec4(aPosition, 0.0, 1.0);
+        gl_Position = model_view_projection * vec4(aPosition, 0.0, 1.0);
     }
+"""
+
+_texture_fragment_code = """
+    precision mediump float;
+    
+    uniform sampler2D tex;
+    
+    varying vec2 uv;
+    
+    void main() {
+        vec2 flipped_uv = vec2(uv.x, 1. - uv.y);
+        gl_FragColor = texture2D(tex, flipped_uv);
+    }
+
 """
 
 _yuv2rgb_fragment_code = """
@@ -30,6 +47,7 @@ _yuv2rgb_fragment_code = """
     uniform sampler2D yTex;
     uniform sampler2D uTex;
     uniform sampler2D vTex;
+    uniform int drawing_crosshair;
 
     uniform vec4 roi;
 
@@ -51,7 +69,10 @@ _yuv2rgb_fragment_code = """
         vec3 rgb = yuv2rgb();
 
         vec3 color = draw_rectangle(rgb, roi.x, roi.y, roi.z, roi.w);
-        color = draw_crosshair(color, crosshair_size, crosshair_thickness);
+        if (drawing_crosshair == 1) {
+            color = draw_crosshair(color, crosshair_size, crosshair_thickness);
+        }
+        
         gl_FragColor = vec4(color, 1.0);
     }
 
@@ -101,6 +122,10 @@ _canvas_vertex_points = np.array([ # xy, uv
 
 _canvas_vertex_indeces = np.array([0, 1, 2, 2, 3, 0], dtype=np.ubyte)
 
+class ProjectionViewModel:
+    KEEP_RATIO = "keep_ratio"
+    FREE_RATIO = "free_ratio"
+
 class OpenGLRenderer:
     def __init__(self, buffer_size=(640, 480), window_x_offset=0, window_y_offset=0):
         self.pos_attrib = 0
@@ -118,32 +143,74 @@ class OpenGLRenderer:
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 0)
         
         # setup constants
-        global SCREEN_WIDTH, SCREEN_HEIGHT
-        SCREEN_WIDTH = buffer_size[0]
-        SCREEN_HEIGHT = buffer_size[1]
-        print(f"Display parameters:\nWidth: {SCREEN_WIDTH}\nHeight: {SCREEN_HEIGHT}\nRefresh rate: {self.mode.refresh_rate}")
+        self.buffer_width = buffer_size[0]
+        self.buffer_height = buffer_size[1]
+        self.screen_width = self.mode.size.width
+        self.screen_height = self.mode.size.height
+        print(f"Display parameters:\nWidth: {self.screen_width}\nHeight: {self.screen_height}\nRefresh rate: {self.mode.refresh_rate}")
         
-        self.window = glfw.create_window(SCREEN_WIDTH, SCREEN_HEIGHT, "Preview", None, None)
+        self.window = glfw.create_window(self.screen_width, self.screen_height, "Preview", None, None)
         glfw.set_window_pos(self.window, window_x_offset, window_y_offset)
         glfw.set_input_mode(self.window, glfw.CURSOR, glfw.CURSOR_DISABLED)
         glfw.make_context_current(self.window)
         
-        self.create_canvas()
+        self.create_canvas()     
+        glClearColor(*clear_color)
     
     
     def init_yuv2rgb_shader(self) -> None:
         self.create_yuv2rgb_shader_program()
         self.init_stream_texture_yuv2rgb()
+        
+        
+    def init_texture_shader(self) -> None:
+        self.create_texture_shader()
+        self.init_stream_texture()
+        
+    
+    def create_texture_shader(self) -> None:
+        vertex_module = create_shader_module(_vertex_code, GL_VERTEX_SHADER)
+        fragment_module = create_shader_module(_texture_fragment_code, GL_FRAGMENT_SHADER)
+        self.texture_shader = compileProgram(vertex_module, fragment_module)
+      
+        glDeleteShader(vertex_module)
+        glDeleteShader(fragment_module)
     
     
     def create_yuv2rgb_shader_program(self) -> None:
-        vertex_module = create_shader_module(_yuv2rgb_vertex_code, GL_VERTEX_SHADER)
+        vertex_module = create_shader_module(_vertex_code, GL_VERTEX_SHADER)
         fragment_module = create_shader_module(_yuv2rgb_fragment_code, GL_FRAGMENT_SHADER)
-        
-        self.yuv2rgb_shader = compileProgram(vertex_module, fragment_module)
+        self.yuv2rgb_shader = compileProgram(vertex_module, fragment_module)    
         
         glDeleteShader(vertex_module)
         glDeleteShader(fragment_module)
+        
+    
+    def get_keep_ratio_scale_matrix(self) -> np.ndarray:
+        screen_aspect = self.screen_width / self.screen_height
+        buffer_aspect = self.buffer_width / self.buffer_height
+
+        if screen_aspect > buffer_aspect:
+            scale_y = 1.0
+            scale_x = buffer_aspect / screen_aspect
+        else:
+            scale_x = 1.0
+            scale_y = screen_aspect / buffer_aspect
+
+        return np.array([
+            [scale_x, 0.0, 0.0, 0.0],
+            [0.0, scale_y, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
+        ], dtype=np.float32)
+        
+    def get_free_ratio_scale_matrix(self) -> np.ndarray:
+        return np.array([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0]
+        ], dtype=np.float32)
         
         
     def init_stream_texture_yuv2rgb(self) -> None:
@@ -151,6 +218,7 @@ class OpenGLRenderer:
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "yTex"), 0)
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "uTex"), 1)
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "vTex"), 2)
+        glUniformMatrix4fv(glGetUniformLocation(self.yuv2rgb_shader, "model_view_projection"), 1, GL_FALSE, self.get_keep_ratio_scale_matrix())
         
         self.y_tex, self.u_tex, self.v_tex = glGenTextures(3)
         self.textures.append(self.y_tex)
@@ -160,26 +228,63 @@ class OpenGLRenderer:
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, SCREEN_WIDTH, SCREEN_HEIGHT, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, self.buffer_width, self.buffer_height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
         
         glBindTexture(GL_TEXTURE_2D, self.u_tex)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, self.buffer_width // 2, self.buffer_height // 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
         
         glBindTexture(GL_TEXTURE_2D, self.v_tex)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, self.buffer_width // 2, self.buffer_height // 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
         
         glBindTexture(GL_TEXTURE_2D, 0)
         
+        
+    def init_stream_texture(self):
+        glUseProgram(self.texture_shader)
+        glUniform1i(glGetUniformLocation(self.texture_shader, "tex"), 0)
+        glUniformMatrix4fv(glGetUniformLocation(self.texture_shader, "model_view_projection"), 1, GL_FALSE, self.get_keep_ratio_scale_matrix())
+        self.rgb_tex = glGenTextures(1)
+        self.textures.append(self.rgb_tex)
+        glBindTexture(GL_TEXTURE_2D, self.rgb_tex)
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, self.buffer_width, self.buffer_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        
     
-    def diplay_yuv_frame(self, frame_yuv: np.ndarray, roi: np.ndarray) -> None:
+    def change_view_projection_model(self, model: str) -> None:
+        if model == ProjectionViewModel.KEEP_RATIO:
+            glUseProgram(self.yuv2rgb_shader)
+            glUniformMatrix4fv(glGetUniformLocation(self.yuv2rgb_shader, "model_view_projection"), 1, GL_FALSE, self.get_keep_ratio_scale_matrix())
+            glUseProgram(self.texture_shader)
+            glUniformMatrix4fv(glGetUniformLocation(self.texture_shader, "model_view_projection"), 1, GL_FALSE, self.get_keep_ratio_scale_matrix())
+        elif model == ProjectionViewModel.FREE_RATIO:
+            glUseProgram(self.yuv2rgb_shader)
+            glUniformMatrix4fv(glGetUniformLocation(self.yuv2rgb_shader, "model_view_projection"), 1, GL_FALSE, self.get_free_ratio_scale_matrix())
+            glUseProgram(self.texture_shader)
+            glUniformMatrix4fv(glGetUniformLocation(self.texture_shader, "model_view_projection"), 1, GL_FALSE, self.get_free_ratio_scale_matrix())
+
+    
+    def set_yuv_frame_drawings(self, roi: np.ndarray = None, drawing_crosshair=True) -> None:
         glUseProgram(self.yuv2rgb_shader)
-        w, h = (SCREEN_WIDTH, SCREEN_HEIGHT)
+        if roi is None:
+            roi = np.array([0, 0, 0, 0], dtype=np.float32)
+        glUniform4fv(glGetUniformLocation(self.yuv2rgb_shader, "roi"), 1, roi)
+        glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "drawing_crosshair"), int(drawing_crosshair))
+    
+    
+    def diplay_yuv_frame(self, frame_yuv: np.ndarray) -> None:
+        glUseProgram(self.yuv2rgb_shader)
+        glClear(GL_COLOR_BUFFER_BIT)
+        
+        w, h = (self.buffer_width, self.buffer_height)
         y_size = w * h
         u_size = w * h // 4
         v_size = u_size
@@ -187,8 +292,6 @@ class OpenGLRenderer:
         y = np.frombuffer(frame_yuv, dtype=np.uint8, count=y_size)
         u = np.frombuffer(frame_yuv, dtype=np.uint8, count=u_size, offset=y_size)
         v = np.frombuffer(frame_yuv, dtype=np.uint8, count=v_size, offset=y_size+u_size)
-        
-        glUniform4fv(glGetUniformLocation(self.yuv2rgb_shader, "roi"), 1, roi)
         
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.y_tex)
@@ -204,6 +307,20 @@ class OpenGLRenderer:
         
         self.draw_canvas()       
         glfw.swap_buffers(self.window)
+        
+        
+    def display_rgb_frame(self, frame: np.ndarray) -> None:
+        glUseProgram(self.texture_shader)
+        glClear(GL_COLOR_BUFFER_BIT)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.rgb_tex)
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.buffer_width, self.buffer_height, GL_RGBA, GL_UNSIGNED_BYTE, frame)
+        self.draw_canvas()
+        glfw.swap_buffers(self.window)
+        
+        
+    def get_buffer_frame(self, buffer: np.ndarray) -> None:
+        glReadPixels(0, 0, self.screen_width, self.screen_height, GL_RGBA, GL_UNSIGNED_BYTE, buffer)
       
         
     def create_canvas(self) -> None:      
@@ -245,11 +362,11 @@ class OpenGLRenderer:
         glDisableVertexAttribArray(texture_coordinates_attribute_index)
         
         
-    def quit(self) -> None:
+    def close(self) -> None:
         glDeleteProgram(self.yuv2rgb_shader)
+        glDeleteProgram(self.texture_shader)
         glDeleteBuffers(len(self.buffers), self.buffers)
         glDeleteTextures(len(self.textures), self.textures)
         glfw.destroy_window(self.window)
         glfw.terminate()
         
-    
