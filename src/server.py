@@ -28,13 +28,14 @@ def get_ip_for_interface(interface_name):
 
 
 class Server:
-    def __init__(self, interface_name, port):
+    def __init__(self, interface_name, port, start_server=True):
         self.ip = get_ip_for_interface(interface_name)
         self.port = port
         self.client_connections = []
         self.client_connections_lock = threading.Lock()
         self.clients = {}
-        threading.Thread(target=self.start_socket_server, daemon=True).start()
+        if start_server:
+            threading.Thread(target=self.start_socket_server, daemon=True).start()
     
     
     def start_socket_server(self):

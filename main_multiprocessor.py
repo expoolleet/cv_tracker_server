@@ -13,7 +13,7 @@ tracking_process = None
 enable_uart = True
 enable_preview = True
 enable_debug = False
-enable_gpio = True
+enable_gpio = False
 enable_streaming_screen = False
 ###
 
@@ -27,9 +27,9 @@ preview_frame = None
 camera_frame_rate = 60
 camera_frame_time = 1 / camera_frame_rate
 camera_size_main = (640, 480)#(960, 720)
-camera_size_lores = camera_size_main#(448, 360)
+camera_size_lores = camera_size_main
 camera_resolution = CameraResolution.LORES
-camera_preview_frame_rate = 60
+camera_preview_frame_rate = 40
 video_writing_frame_rate = 30
 camera_preview_frame_time = mp.Value('d', 1.0 / camera_preview_frame_rate)
 camera_restart_timeout = 5
@@ -89,7 +89,7 @@ uart_lock = threading.Lock()
 stream_protocol = StreamProtocol.UDP
 server_port = 8000
 ffmpeg_port = 8001
-server = Server(net_interface, server_port)
+server = Server(net_interface, server_port, True)
 
 pipeline = WrapperPipeline()
 pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=False)
@@ -288,14 +288,26 @@ def change_roi_from_uart(value):
     current_roi_size = min_size + steps * step
     print(current_roi_size)
     reset_roi()
-    
+
+
+def draw_debug_info(bgr_frame):
+    if len(pipeline.active_pipeline_steps) > 0:
+        tracker_data = data_dict.get("tracker_data", {})
+        fps_data = [f"FPS: {tracker_data['fps']}" if "fps" in tracker_data else "FPS: None", (50, 50)]
+        dx, dy = get_xy_deviations()
+        deviations_data = [f"dx: {dx}; dy: {dy}", (50, 100)]
+        processed_data = pipeline.process(bgr_frame, None, [fps_data, deviations_data])
+        frame = processed_data[0]
+    return frame
+ 
     
 def write_video(exit_event, fps, video_size):
     frame_time = 1 / fps
-    with VideoWriter(path=base_path, fps=fps, size=video_size) as vw:
-        while data_dict["tracker_initialized"] and not exit_event.is_set():
-            vw.write(preview_frame)
-            time.sleep(frame_time)     
+    with VideoWriter(path=base_path, fps=fps, size=video_size, bitrate="1.5M") as vw:
+        start_time = time.time()
+        while data_dict["tracker_initialized"] and not exit_event.is_set():   
+            vw.write(yuv_frame)
+            start_time = sleep(start_time, frame_time)
 
 
 def get_normal_roi(roi: list | tuple) -> np.ndarray:
@@ -308,7 +320,7 @@ def get_normal_roi(roi: list | tuple) -> np.ndarray:
 
 def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event, shared_memory_name, frame_shape, frame_dtype):  
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    global preview_frame
+    global yuv_frame
     try:
         renderer = OpenGLRenderer(buffer_size=camera_size)
         renderer.init_yuv2rgb_shader()
@@ -317,15 +329,16 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
         renderer.init_stream_texture()
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
         no_frame_image = cv2.putText(np.zeros((480, 640, 4)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
-        frame_buffer = np.empty((renderer.screen_height, renderer.screen_width, 4), dtype=np.uint8, order="C")
         print("Camera preview loop is started")
         
         video_writer = None
         start_time = time.time()
+        frame_count = 0
         while not exit_event.is_set():
-
+            frame_count += 1
             if not is_camera_closed_event.is_set():
                 frame = sm_client.get_frame(False)
+                yuv_frame = frame
             
             if not is_camera_closed_event.is_set():
                 current_roi = data_dict.get("current_roi", (0, 0, 0, 0))  
@@ -335,22 +348,10 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
                 continue 
             if not is_camera_closed_event.is_set():
                 renderer.set_yuv_frame_drawings(get_normal_roi(current_roi) if bool(drawing_roi.value) else None, bool(drawing_crosshair.value))
-                renderer.diplay_yuv_frame(frame)
-                if enable_debug:
-                    renderer.get_buffer_frame(frame_buffer)
-                    bgr_frame = cv2.flip(cv2.cvtColor(frame_buffer, cv2.COLOR_RGBA2BGR), 0)
-                    if len(pipeline.active_pipeline_steps) > 0:
-                        tracker_data = data_dict.get("tracker_data", {})
-                        fps_data = [f"FPS: {tracker_data['fps']}" if "fps" in tracker_data else "FPS: None", (50, 50)]
-                        dx, dy = get_xy_deviations()
-                        deviations_data = [f"dx: {dx}; dy: {dy}", (50, 100)]
-                        processed_data = pipeline.process(bgr_frame, None, [fps_data, deviations_data])
-                        preview_frame = processed_data[0]
-                    else:
-                        preview_frame = bgr_frame
+                renderer.diplay_yuv_frame(frame)  
             else:
                 renderer.display_rgb_frame(no_frame_image)
-                        
+                  
             # Processing messages from main process
             process_message_queue(renderer)
               
@@ -363,7 +364,7 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
             if video_writer is None and tracker_initialized:
                 video_writer = threading.Thread(
                     target=write_video, 
-                    args=(exit_event, video_writing_frame_rate, (renderer.screen_width, renderer.screen_height)))
+                    args=(exit_event, video_writing_frame_rate, camera_size))
                 video_writer.start()
             elif video_writer is not None and not tracker_initialized:
                 video_writer = None 
@@ -584,7 +585,7 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     wait_first_frame_event.wait()
     sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
-    fps_counter = FPSCounter()      
+    fps_counter = FPSCounter()
     try:
         start_time = time.time()
         while not exit_event.is_set():
@@ -592,14 +593,13 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
             tracker_initialized = data_dict.get("tracker_initialized", False)
             current_roi = data_dict.get("current_roi", (0, 0, 0, 0))
             frame = convert_frame_to_gray(sm_client.get_frame())
-            
+
             with roi_lock:
                 if tracker_requested:
                     if not tracker_initialized:
                         
                         tracker = get_tracker()  
                         try:
-                            print(frame.shape)
                             tracker.init(frame, current_roi)
                             data_dict["tracker_initialized"] = True
                             data_dict["tracker_requested"] = False
@@ -611,7 +611,7 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
                     #fps_timer = cv2.getTickCount()
                     success, bbox, _ = tracker.update(frame)
                     #tracker_current_fps = cv2.getTickFrequency() / (cv2.getTickCount() - fps_timer)
-                    fps = fps_counter.update()
+                    fps = fps_counter.update(print_fps=False)
 
                     if success:
                         data_dict["current_roi"] = tuple(map(int, bbox))
@@ -706,6 +706,7 @@ if __name__ == "__main__":
         
     tracking_process = mp.Process(target=tracking, args=(sm_name, frame_shape, frame_dtype, data_dict, camera_frame_time, wait_first_frame_event, exit_event,))
     tracking_process.start()
+    
     
     if enable_gpio:
         gpio_init()

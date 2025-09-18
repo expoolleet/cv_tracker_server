@@ -3,8 +3,9 @@ os.environ["PYOPENGL_PLATFORM"]="egl"
 import glfw
 from OpenGL.GL import *
 from OpenGL.GL.shaders import compileShader, compileProgram
-import numpy as np
 
+import numpy as np
+import threading
 
 def create_shader_module(shader_source_code, shader_type):
     return compileShader(shader_source_code, shader_type)
@@ -127,11 +128,13 @@ class ProjectionViewModel:
     FREE_RATIO = "free_ratio"
 
 class OpenGLRenderer:
-    def __init__(self, buffer_size=(640, 480), window_x_offset=0, window_y_offset=0):
+    def __init__(self, buffer_size=(640, 480), window_x_offset=0, window_y_offset=0, vsync=True):
         self.pos_attrib = 0
         self.color_attrib = 1
         self.textures = []
         self.buffers = []
+        
+        self.context_lock = threading.Lock()
         
         glfw.init()
         self.monitor = glfw.get_primary_monitor()
@@ -153,6 +156,7 @@ class OpenGLRenderer:
         glfw.set_window_pos(self.window, window_x_offset, window_y_offset)
         glfw.set_input_mode(self.window, glfw.CURSOR, glfw.CURSOR_DISABLED)
         glfw.make_context_current(self.window)
+        glfw.swap_interval(int(vsync))
         
         self.create_canvas()     
         glClearColor(*clear_color)
@@ -315,11 +319,12 @@ class OpenGLRenderer:
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.rgb_tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.buffer_width, self.buffer_height, GL_RGBA, GL_UNSIGNED_BYTE, frame)
+        
         self.draw_canvas()
         glfw.swap_buffers(self.window)
         
         
-    def get_buffer_frame(self, buffer: np.ndarray) -> None:
+    def read_buffer(self, buffer: np.ndarray) -> None:
         glReadPixels(0, 0, self.screen_width, self.screen_height, GL_RGBA, GL_UNSIGNED_BYTE, buffer)
       
         
