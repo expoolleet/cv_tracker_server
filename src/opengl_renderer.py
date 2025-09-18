@@ -59,11 +59,11 @@ _yuv2rgb_fragment_code = """
     vec3 draw_crosshair(vec3 color, float size, float thickness);
     vec3 rectangle_color = vec3(1.0, 1.0, 1.0);
     vec3 crosshair_color = vec3(1.0, 1.0, 1.0);
-    float crosshair_size = 0.015;
-    float crosshair_thickness = 0.003;
+    float crosshair_size = 0.012;
+    float crosshair_thickness = 0.0025;
 
-    float rectangle_vertical_thickness = 0.003;
-    float rectangle_horizontal_thickness = 0.0036; //rectangle_vertical_thickness * 1.2
+    float rectangle_vertical_thickness = 0.0025;
+    float rectangle_horizontal_thickness = 0.003; //rectangle_vertical_thickness * 1.2
 
     void main() {
 

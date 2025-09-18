@@ -92,7 +92,8 @@ ffmpeg_port = 8001
 server = Server(net_interface, server_port, True)
 
 pipeline = WrapperPipeline()
-pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=False)
+pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=True)
+pipeline.register_operation(draw_crosshair, draw_crosshair.__name__, default_enabled=True)
 pipeline.register_operation(draw_text, draw_text.__name__, default_enabled=True)
 
 roi_lock = mp.Lock()
@@ -276,28 +277,36 @@ def change_frame_borders(data):
         message_queue.put(FREE_ASPECT_RATIO)
      
         
-def change_roi_from_uart(value):
-    global current_roi_size
+def change_roi_with_byte_value(value, print_changed_roi_size=False):
+    global current_roi_size, current_roi_size_byte_value
     a = 0
     b = 255
+    value = np.clip(value, a, b)
+    current_roi_size_byte_value = value
     min_size = 32
     max_size = 128
     step = 4
-    norm_value = (np.clip(value, a, b) - a) / (b - a)
+    norm_value = (value - a) / (b - a)
     steps = round(norm_value * (max_size - min_size) / step)
     current_roi_size = min_size + steps * step
-    print(current_roi_size)
+    if print_changed_roi_size:
+        print(f"Current new ROI size: {current_roi_size}")
     reset_roi()
 
 
-def draw_debug_info(bgr_frame):
+def draw_debug_info(frame):
     if len(pipeline.active_pipeline_steps) > 0:
         tracker_data = data_dict.get("tracker_data", {})
         fps_data = [f"FPS: {tracker_data['fps']}" if "fps" in tracker_data else "FPS: None", (50, 50)]
         dx, dy = get_xy_deviations()
         deviations_data = [f"dx: {dx}; dy: {dy}", (50, 100)]
-        processed_data = pipeline.process(bgr_frame, None, [fps_data, deviations_data])
-        frame = processed_data[0]
+        current_roi = data_dict.get("current_roi", (0, 0, 0, 0))
+        processed_data = pipeline.process(
+            {"frame": frame.copy(), 
+             "roi": current_roi, 
+             "text_data_list": [fps_data, deviations_data], 
+             "crosshair_center": (camera_size[0] // 2, camera_size[1] // 2)})
+        frame = processed_data["frame"]
     return frame
  
     
@@ -306,7 +315,7 @@ def write_video(exit_event, fps, video_size):
     with VideoWriter(path=base_path, fps=fps, size=video_size, bitrate="1.5M") as vw:
         start_time = time.time()
         while data_dict["tracker_initialized"] and not exit_event.is_set():   
-            vw.write(yuv_frame)
+            vw.write(draw_debug_info(yuv_frame))
             start_time = sleep(start_time, frame_time)
 
 
@@ -691,7 +700,7 @@ if __name__ == "__main__":
     subscribe(TOGGLE_ROI_EVENT, toggle_roi)
     subscribe(TOGGLE_CROSSHAIR_EVENT, toggle_crosshair)
     subscribe(CHANGE_FRAME_BORDERS_EVENT, change_frame_borders)
-    subscribe(CHANGE_ROI_FROM_UART_EVENT, change_roi_from_uart)
+    subscribe(CHANGE_ROI_FROM_UART_EVENT, change_roi_with_byte_value)
     
     register_zeroconf(server.ip, server_port, stream_protocol.name, ffmpeg_port, tracking_frame_size)
     
@@ -707,13 +716,15 @@ if __name__ == "__main__":
     tracking_process = mp.Process(target=tracking, args=(sm_name, frame_shape, frame_dtype, data_dict, camera_frame_time, wait_first_frame_event, exit_event,))
     tracking_process.start()
     
-    
     if enable_gpio:
-        gpio_init()
+        change_roi_with_byte_value(85, True)
+        gpio_handler = GPIOHandler()
+        gpio_handler.init_button_1(lambda: post_event(REQUEST_TRACKING_EVENT), lambda: post_event(STOP_TRACKING_EVENT))
+        gpio_handler.init_button_2(lambda: change_roi_with_byte_value((lambda: current_roi_size_byte_value - 11)(), True), None)
+        gpio_handler.init_button_3(lambda: change_roi_with_byte_value((lambda: current_roi_size_byte_value + 11)(), True), None)
         print("Initializing GPIO pins...")
-        gpio_worker_thread = threading.Thread(
-            target=handle_gpio27_pin_state_loop, 
-            args=(exit_event, lambda: post_event(REQUEST_TRACKING_EVENT), lambda: post_event(STOP_TRACKING_EVENT)))
+        gpio_worker_thread = threading.Thread(target=gpio_handler.handle_buttons, args=(exit_event,))
         gpio_worker_thread.start()
     
     main(sm_name)
+    

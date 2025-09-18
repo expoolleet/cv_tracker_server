@@ -33,7 +33,7 @@
             if self.operation_enabled_status[name]:
                 self.active_pipeline_steps.append(operation)
 
-    def process(self, *args):
+    def process(self, args):
         current_data = args
         for operation in self.active_pipeline_steps:
             current_data = operation(current_data)
