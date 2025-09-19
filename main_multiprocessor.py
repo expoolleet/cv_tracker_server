@@ -56,7 +56,10 @@ tracking_frame_size = camera_size_lores
 #--------------------------------#
 defualt_roi_size = 64
 current_roi_size = defualt_roi_size
-data_dict["current_roi"] = (int(tracker_size[0] // 2 - defualt_roi_size // 2), int(tracker_size[1] // 2 - defualt_roi_size // 2), defualt_roi_size, defualt_roi_size)
+data_dict["current_roi"] = (int(tracker_size[0] // 2 - defualt_roi_size // 2), 
+                            int(tracker_size[1] // 2 - defualt_roi_size // 2), 
+                            defualt_roi_size, 
+                            defualt_roi_size)
 tracker_dict["max_skipped_frames"] = 1
 tracker_dict["using_kalman"] = False 
 tracker_dict["training_images_count"] = 9 
@@ -96,6 +99,9 @@ pipeline.register_operation(draw_roi, draw_roi.__name__, default_enabled=True)
 pipeline.register_operation(draw_crosshair, draw_crosshair.__name__, default_enabled=True)
 pipeline.register_operation(draw_text, draw_text.__name__, default_enabled=True)
 
+display_messager_queue = mp.Queue()
+display_messager = DisplayMessager(multiprocessing_shared_queue=display_messager_queue)
+
 roi_lock = mp.Lock()
 
 camera = None
@@ -103,7 +109,10 @@ def reset_camera():
     global camera
     if camera is not None:
         camera.close()
-    camera = setup_camera(main={"format": "RGB888", "size": camera_size_main}, lores={"format": "YUV420", "size": camera_size_lores}, fps=camera_frame_rate)
+    camera = setup_camera(
+        main={"format": "RGB888", "size": camera_size_main}, 
+        lores={"format": "YUV420", "size": camera_size_lores}, 
+        fps=camera_frame_rate)
     camera.set_controls({"AeEnable": True})
     camera.start()
     
@@ -127,7 +136,10 @@ current_tracker = Tracker.MK
 
 
 def reset_roi():
-    data_dict["current_roi"] = (int(tracker_size[0] // 2 - current_roi_size // 2), int(tracker_size[1] // 2 - current_roi_size // 2), current_roi_size, current_roi_size)
+    data_dict["current_roi"] = (int(tracker_size[0] // 2 - current_roi_size // 2), 
+                                int(tracker_size[1] // 2 - current_roi_size // 2),
+                                current_roi_size, 
+                                current_roi_size)
 
 
 def sleep(start_time, time_s):
@@ -175,7 +187,13 @@ def update_tracking(data):
         tracker_dict["max_corr"] = float(data["max_corr"])
         tracker_dict["sigma_factor"] = float(data["sigma_factor"])
         data_dict["tracker_requested"] = True
-    data_dict["tracker_data"] = {"roi": data_dict["current_roi"], "correlation": 0, "template_scale": 0, "learning_rate": 0, "correlation_target": 0, "fps": 0}
+    data_dict["tracker_data"] = {
+        "roi": data_dict["current_roi"], 
+        "correlation": 0, 
+        "template_scale": 0, 
+        "learning_rate": 0, 
+        "correlation_target": 0, 
+        "fps": 0 }
     server.send_command_to_clients(Command.TRACKER_DATA, data_dict["tracker_data"])
     print(f'Update tracking with ROI: {data_dict["current_roi"]}, Kalman: {data["kalman"]}, Skip frames: {data["skip_frames"]}, Training images count: {data["training_images_count"]}, Alpha smoothing: {data["alpha_smoothing"]}, Max corr: {data["max_corr"]}, Sigma factor: {data["sigma_factor"]}')
     
@@ -220,7 +238,9 @@ def show_camera_preview_by_client(data, play_preview_event):
         print("Camera preview thread is already running")
         return
     
-    camera_preview_process = mp.Process(target=_camera_preview_loop, args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype))
+    camera_preview_process = mp.Process(
+        target=_camera_preview_loop, 
+        args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, display_messager_queue))
     print(f"Camera preview is starting by {data['ip']}")
     camera_preview_process.start()
 
@@ -235,7 +255,9 @@ def show_camera_preview(play_preview_event):
         print("Camera preview was resumed")
         return
     
-    camera_preview_process = mp.Process(target=_camera_preview_loop, args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype))
+    camera_preview_process = mp.Process(
+        target=_camera_preview_loop, 
+        args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, display_messager_queue))
     camera_preview_process.start()
     print("Camera preview was started")
     
@@ -290,7 +312,8 @@ def change_roi_with_byte_value(value, print_changed_roi_size=False):
     steps = round(norm_value * (max_size - min_size) / step)
     current_roi_size = min_size + steps * step
     if print_changed_roi_size:
-        print(f"Current new ROI size: {current_roi_size}")
+        print(f"New ROI size: {current_roi_size}")
+    display_messager.add_message(f"REGION SIZE: {current_roi_size}")
     reset_roi()
 
 
@@ -301,11 +324,11 @@ def draw_debug_info(frame):
         dx, dy = get_xy_deviations()
         deviations_data = [f"dx: {dx}; dy: {dy}", (50, 100)]
         current_roi = data_dict.get("current_roi", (0, 0, 0, 0))
-        processed_data = pipeline.process(
-            {"frame": frame.copy(), 
-             "roi": current_roi, 
-             "text_data_list": [fps_data, deviations_data], 
-             "crosshair_center": (camera_size[0] // 2, camera_size[1] // 2)})
+        processed_data = pipeline.process({
+            "frame": frame.copy(), 
+            "roi": current_roi, 
+            "text_data_list": [fps_data, deviations_data], 
+            "crosshair_center": (camera_size[0] // 2, camera_size[1] // 2)})
         frame = processed_data["frame"]
     return frame
  
@@ -327,7 +350,14 @@ def get_normal_roi(roi: list | tuple) -> np.ndarray:
     return np.array([x, y, w, h], dtype=np.float32)
 
 
-def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event, shared_memory_name, frame_shape, frame_dtype):  
+def _camera_preview_loop(
+    play_preview_event, 
+    exit_event, 
+    is_camera_closed_event, 
+    shared_memory_name, 
+    frame_shape, 
+    frame_dtype, 
+    display_messager_queue):  
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     global yuv_frame
     try:
@@ -338,11 +368,11 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
         renderer.init_stream_texture()
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
         no_frame_image = cv2.putText(np.zeros((480, 640, 4)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
-        print("Camera preview loop is started")
-        
+        display_messager = DisplayMessager(multiprocessing_shared_queue=display_messager_queue)
         video_writer = None
         start_time = time.time()
         frame_count = 0
+        print("Camera preview loop is started")
         while not exit_event.is_set():
             frame_count += 1
             if not is_camera_closed_event.is_set():
@@ -357,7 +387,8 @@ def _camera_preview_loop(play_preview_event, exit_event, is_camera_closed_event,
                 continue 
             if not is_camera_closed_event.is_set():
                 renderer.set_yuv_frame_drawings(get_normal_roi(current_roi) if bool(drawing_roi.value) else None, bool(drawing_crosshair.value))
-                renderer.diplay_yuv_frame(frame)  
+                preview_frame = display_messager.show_message(frame)
+                renderer.diplay_yuv_frame(preview_frame)  
             else:
                 renderer.display_rgb_frame(no_frame_image)
                   
@@ -446,6 +477,7 @@ def stop_tracking(from_uart=False):
         reset_roi()
         if not from_uart:
             server.send_command_to_clients(Command.STOP_TRACKING)
+        display_messager.add_message("TRACKER - OFF")
         
         
 def request_tracking_client():
@@ -605,14 +637,14 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
 
             with roi_lock:
                 if tracker_requested:
-                    if not tracker_initialized:
-                        
+                    if not tracker_initialized:    
                         tracker = get_tracker()  
                         try:
                             tracker.init(frame, current_roi)
                             data_dict["tracker_initialized"] = True
-                            data_dict["tracker_requested"] = False
                             print("Tracker reinitialized with ROI:", current_roi)
+                            data_dict["tracker_requested"] = False
+                            display_messager.add_message("TRACKER - ON")
                         except Exception as e:
                             print(f"Error initializing tracker with ROI {current_roi}: {e}")
                             data_dict["tracker_initialized"] = False
@@ -717,11 +749,11 @@ if __name__ == "__main__":
     tracking_process.start()
     
     if enable_gpio:
-        change_roi_with_byte_value(85, True)
+        change_roi_with_byte_value(85) # 64px
         gpio_handler = GPIOHandler()
         gpio_handler.init_button_1(lambda: post_event(REQUEST_TRACKING_EVENT), lambda: post_event(STOP_TRACKING_EVENT))
-        gpio_handler.init_button_2(lambda: change_roi_with_byte_value((lambda: current_roi_size_byte_value - 11)(), True), None)
-        gpio_handler.init_button_3(lambda: change_roi_with_byte_value((lambda: current_roi_size_byte_value + 11)(), True), None)
+        gpio_handler.init_button_2(lambda: change_roi_with_byte_value((lambda: current_roi_size_byte_value - 11)()), None)
+        gpio_handler.init_button_3(lambda: change_roi_with_byte_value((lambda: current_roi_size_byte_value + 11)()), None)
         print("Initializing GPIO pins...")
         gpio_worker_thread = threading.Thread(target=gpio_handler.handle_buttons, args=(exit_event,))
         gpio_worker_thread.start()

@@ -26,6 +26,7 @@ from src.data_handler import CSVHandler
 from src.video_writer import VideoWriter
 from src.opengl_renderer import OpenGLRenderer, ProjectionViewModel
 from src.gpio import GPIOHandler
+from src.display_messager import DisplayMessager
 from tracker.fast_mosse_tracker import FastMosseTracker
 from tracker.xor_tracker import XORTracker
 

@@ -20,7 +20,8 @@ BUTTON_RELEASED = GPIO.HIGH
 
 loop_sleep_time = 0.2
 
-used_pins = [ BUTTON_1_PIN, BUTTON_2_PIN, BUTTON_3_PIN, PIN_OUT_1, PIN_OUT_2, PIN_OUT_3, PIN_OUT_4, PIN_OUT_5 ]
+used_out_pins = [ PIN_OUT_1, PIN_OUT_2, PIN_OUT_3, PIN_OUT_4, PIN_OUT_5 ]
+used_in_pins = [ BUTTON_1_PIN, BUTTON_2_PIN, BUTTON_3_PIN ]
 
 @dataclass
 class GPIOButton:
@@ -33,6 +34,7 @@ class GPIOButton:
 
 def disable_pins(pins: list[int]) -> None:
     for pin in pins:
+        GPIO.gpio_function
         GPIO.output(pin, False)
         
 def enable_pins(pins: list[int]) -> None:
@@ -58,6 +60,7 @@ class GPIOHandler:
         GPIO.setup(PIN_OUT_4, GPIO.OUT)
         GPIO.setup(PIN_OUT_5, GPIO.OUT)
         self.buttons: list[GPIOButton] = []
+        disable_pins(used_out_pins)
     
     def init_button_1(self, on_press_callback: Callable | None, on_release_callback: Callable | None) -> None:
         self.button_1 = GPIOButton(BUTTON_1_PIN, False, on_press_callback, on_release_callback, [PIN_OUT_1], [PIN_OUT_4])
@@ -90,7 +93,6 @@ class GPIOHandler:
                         button.is_pressed = False
                         enable_pins(button.high_pins_when_released)
                         disable_pins(button.high_pins_when_pressed)
-                    #time.sleep(0.1)
                 time.sleep(loop_sleep_time)
         except KeyboardInterrupt:
             pass
@@ -99,6 +101,6 @@ class GPIOHandler:
 
 def gpio_cleanup():
     print("GPIO is cleaning...")
-    GPIO.cleanup(used_pins)
+    GPIO.cleanup([*used_out_pins, *used_in_pins])
     print("GPIO cleanup done.")
 
