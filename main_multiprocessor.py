@@ -361,12 +361,12 @@ def _camera_preview_loop(
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     global yuv_frame
     try:
+        sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
         renderer = OpenGLRenderer(buffer_size=camera_size)
         renderer.init_yuv2rgb_shader()
         renderer.init_stream_texture_yuv2rgb()
         renderer.init_texture_shader()
         renderer.init_stream_texture()
-        sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
         no_frame_image = cv2.putText(np.zeros((480, 640, 4)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
         display_messager = DisplayMessager(multiprocessing_shared_queue=display_messager_queue)
         video_writer = None

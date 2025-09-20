@@ -6,6 +6,7 @@ from OpenGL.GL.shaders import compileShader, compileProgram
 
 import numpy as np
 import threading
+import time
 
 def create_shader_module(shader_source_code, shader_type):
     return compileShader(shader_source_code, shader_type)
@@ -46,8 +47,9 @@ _yuv2rgb_fragment_code = """
     precision mediump float;
 
     uniform sampler2D yTex;
-    uniform sampler2D uTex;
-    uniform sampler2D vTex;
+    uniform sampler2D uvTex;
+    //uniform sampler2D uTex;
+    //uniform sampler2D vTex;
     uniform int drawing_crosshair;
 
     uniform vec4 roi;
@@ -104,8 +106,11 @@ _yuv2rgb_fragment_code = """
         vec2 pos = uv;
         pos.y = 1. - pos.y;
         float y = texture2D(yTex, pos).r;
-        float u = texture2D(uTex, pos).r - 0.5;
-        float v = texture2D(vTex, pos).r - 0.5; 
+        vec2 uv_plane = texture2D(uvTex, pos).ra;
+        float u = uv_plane.x - 0.5;
+        float v = uv_plane.y - 0.5;
+        //float u = texture2D(uTex, pos).r - 0.5;
+        //float v = texture2D(vTex, pos).r - 0.5; 
 
         float r = y + 1.5748 * v;
         float g = y - 0.187324 * u - 0.468124 * v;
@@ -208,6 +213,7 @@ class OpenGLRenderer:
             [0.0, 0.0, 0.0, 1.0]
         ], dtype=np.float32)
         
+        
     def get_free_ratio_scale_matrix(self) -> np.ndarray:
         return np.array([
             [1.0, 0.0, 0.0, 0.0],
@@ -220,31 +226,24 @@ class OpenGLRenderer:
     def init_stream_texture_yuv2rgb(self) -> None:
         glUseProgram(self.yuv2rgb_shader)
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "yTex"), 0)
-        glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "uTex"), 1)
-        glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "vTex"), 2)
+        glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "uvTex"), 1)
         glUniformMatrix4fv(glGetUniformLocation(self.yuv2rgb_shader, "model_view_projection"), 1, GL_FALSE, self.get_keep_ratio_scale_matrix())
         
-        self.y_tex, self.u_tex, self.v_tex = glGenTextures(3)
+        self.y_tex, self.uv_tex = glGenTextures(2)
         self.textures.append(self.y_tex)
-        self.textures.append(self.u_tex)
-        self.textures.append(self.v_tex)
+        self.textures.append(self.uv_tex)
         glBindTexture(GL_TEXTURE_2D, self.y_tex)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, self.buffer_width, self.buffer_height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
+
         
-        glBindTexture(GL_TEXTURE_2D, self.u_tex)
+        glBindTexture(GL_TEXTURE_2D, self.uv_tex)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, self.buffer_width // 2, self.buffer_height // 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
-        
-        glBindTexture(GL_TEXTURE_2D, self.v_tex)
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, self.buffer_width // 2, self.buffer_height // 2, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, self.buffer_width // 2, self.buffer_height // 2, 0, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, None)
         
         glBindTexture(GL_TEXTURE_2D, 0)
         
@@ -293,21 +292,18 @@ class OpenGLRenderer:
         u_size = w * h // 4
         v_size = u_size
         
-        y = np.frombuffer(frame_yuv, dtype=np.uint8, count=y_size)
-        u = np.frombuffer(frame_yuv, dtype=np.uint8, count=u_size, offset=y_size)
-        v = np.frombuffer(frame_yuv, dtype=np.uint8, count=v_size, offset=y_size+u_size)
+        y_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=y_size)
+        u_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=u_size, offset=y_size)
+        v_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=v_size, offset=y_size+u_size)
+        uv_plane = np.dstack((u_plane, v_plane))
         
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.y_tex)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_LUMINANCE, GL_UNSIGNED_BYTE, y)
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_LUMINANCE, GL_UNSIGNED_BYTE, y_plane)
         
         glActiveTexture(GL_TEXTURE1)
-        glBindTexture(GL_TEXTURE_2D, self.u_tex)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w // 2, h // 2, GL_LUMINANCE, GL_UNSIGNED_BYTE, u)
-        
-        glActiveTexture(GL_TEXTURE2)
-        glBindTexture(GL_TEXTURE_2D, self.v_tex)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w // 2, h // 2, GL_LUMINANCE, GL_UNSIGNED_BYTE, v)
+        glBindTexture(GL_TEXTURE_2D, self.uv_tex)
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w // 2, h // 2, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, uv_plane)        
         
         self.draw_canvas()       
         glfw.swap_buffers(self.window)
@@ -368,8 +364,10 @@ class OpenGLRenderer:
         
         
     def close(self) -> None:
-        glDeleteProgram(self.yuv2rgb_shader)
-        glDeleteProgram(self.texture_shader)
+        if self.yuv2rgb_shader:
+            glDeleteProgram(self.yuv2rgb_shader)
+        if self.texture_shader:
+            glDeleteProgram(self.texture_shader)
         glDeleteBuffers(len(self.buffers), self.buffers)
         glDeleteTextures(len(self.textures), self.textures)
         glfw.destroy_window(self.window)
