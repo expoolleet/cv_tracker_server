@@ -16,9 +16,6 @@ enable_debug = False
 enable_gpio = False
 enable_streaming_screen = False
 ###
-
-if enable_streaming_screen:
-    start_ffmpeg_screen_stream()
     
 latest_frame_lock = threading.Lock()
 latest_frame = None
@@ -115,7 +112,6 @@ def reset_camera():
         fps=camera_frame_rate)
     camera.set_controls({"AeEnable": True})
     camera.start()
-    
 
 reset_camera()
 controls = camera.capture_metadata()
@@ -358,7 +354,7 @@ def _camera_preview_loop(
     frame_shape, 
     frame_dtype, 
     display_messager_queue):  
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    ignore_interruption()
     global yuv_frame
     try:
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
@@ -560,9 +556,18 @@ def get_xy_deviations():
     dx = tracker_size[0] // 2 - (data_dict["current_roi"][0] + data_dict["current_roi"][2] // 2)
     dy = tracker_size[1] // 2 - (data_dict["current_roi"][1] + data_dict["current_roi"][3] // 2)
     return dx, dy  
+
+
+def handle_interruption():
+    signal.signal(signal.SIGINT, lambda sig, frame: close_server()) # handles CTRL+C or similar program interruption...
+   
+    
+def ignore_interruption():
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
         
-        
-def start_main_loop(shared_memory_name):
+def start_main_loop(shared_memory_name):  
+    handle_interruption() 
     global latest_frame
     try:
         sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
@@ -610,9 +615,6 @@ def start_main_loop(shared_memory_name):
                 wait_first_frame_event.set()
                 
             start_time = sleep(start_time, target_frametime)
-    except KeyboardInterrupt:
-        print("\nKeyboardInterrupt detected. Exiting main loop...")
-        raise
     except Exception as e:
         print(f"An error occurred in the main loop: {e}")
         restart_s = 5
@@ -623,7 +625,7 @@ def start_main_loop(shared_memory_name):
 
 
 def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_frametime, wait_first_frame_event, exit_event):
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    ignore_interruption()
     wait_first_frame_event.wait()
     sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
     fps_counter = FPSCounter()
@@ -648,10 +650,8 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
                         except Exception as e:
                             print(f"Error initializing tracker with ROI {current_roi}: {e}")
                             data_dict["tracker_initialized"] = False
-                if data_dict["tracker_initialized"]:   
-                    #fps_timer = cv2.getTickCount()
+                if data_dict["tracker_initialized"]:
                     success, bbox, _ = tracker.update(frame)
-                    #tracker_current_fps = cv2.getTickFrequency() / (cv2.getTickCount() - fps_timer)
                     fps = fps_counter.update(print_fps=False)
 
                     if success:
@@ -672,9 +672,9 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
 def close_server():
     if is_server_closing.value == 1:
         return
-    is_server_closing.value = 0
+    is_server_closing.value = 1
     server.send_command_to_clients(Command.DISCONNECT)
-    print('1. Disconnecting all clients if any...')
+    print('\n1. Disconnecting all clients if any...')
     server.close_clients_pipes()
     print('2. Closing all ffmpeg proccesses if any...')
     stop_ffmpeg_procces()
@@ -687,20 +687,23 @@ def close_server():
     main_loop_event.set()
     exit_event.set()
 
-    tracking_process.join()
+    join_timeout = 0.5
+    
+    tracking_process.join(timeout=join_timeout)
     tracking_process.terminate()
 
-    camera_preview_process.join()
+    camera_preview_process.join(timeout=join_timeout)
     camera_preview_process.terminate()        
 
     frame_shared_memory_handler.close()
     
     if gpio_worker_thread:
-        gpio_worker_thread.join() 
+        gpio_worker_thread.join(timeout=join_timeout) 
 
     manager.shutdown()
     cv2.destroyAllWindows()
-    print('Server closed.')               
+    print('Server is closed.')               
+
 
 def main(shared_memory_name):
     print("Server is started.\n")
@@ -708,9 +711,6 @@ def main(shared_memory_name):
         while not exit_event.is_set():
             reset_server_state()
             start_main_loop(shared_memory_name)
-    except KeyboardInterrupt:
-        print('\nClosing server...')
-        close_server()
     except Exception as e:
         print(e)
 
@@ -736,6 +736,9 @@ if __name__ == "__main__":
     
     register_zeroconf(server.ip, server_port, stream_protocol.name, ffmpeg_port, tracking_frame_size)
     
+    if enable_streaming_screen:
+        start_ffmpeg_screen_stream()
+    
     if enable_uart:
         open_serial()
         print("Starting UART receiving...")
@@ -759,4 +762,3 @@ if __name__ == "__main__":
         gpio_worker_thread.start()
     
     main(sm_name)
-    
