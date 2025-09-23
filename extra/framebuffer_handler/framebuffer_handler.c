@@ -1,21 +1,33 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <fcntl.h>
+#include <string.h>
 #include <unistd.h>
-#include <linux/fb.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <linux/fb.h>
+
+struct fb_fix_screeninfo finfo;
+struct fb_var_screeninfo vinfo;
+uint8_t *fb_p;
+uint8_t *buffer;
+
+int m_display_width = 0;
+int m_display_height = 0;
+int m_mmap_size = 0;
+int m_screen_size = 0;
+int m_pixel_step = 0;
+
 
 typedef struct {
-    uint8_t *framebuffer_p;
-    int framebuffer_d;
+    int framebuffer_desc;
     int width;
     int height;
-    int x_offset;
-    int y_offset;
     int pixel_step;
     int line_length;
     int screen_size;
+    int mmap_size;
 } DisplayData;
 
 uint16_t rgb888_to_rgb565(uint8_t r, uint8_t g, uint8_t b) {
@@ -25,98 +37,149 @@ uint16_t rgb888_to_rgb565(uint8_t r, uint8_t g, uint8_t b) {
     return color;
 }
 
-void draw_rgb_frame(
-    uint8_t *fbp,
-    int frame_width,
-    int frame_height,
-    int screen_width, 
-    int screen_height,
-    int x_offset,
-    int y_offset,
-    int line_length,
-    int pixel_step,
-    uint8_t *frame) {
+void draw_rgb_frame(int frame_width, int frame_height, uint8_t *frame) {
     for (int y = 0; y < frame_height; y++) {
-        if (y >= screen_height) continue;
+        if (y >= m_display_height) continue;
         for (int x = 0; x < frame_width; x++) {
-            if (x >= screen_width) continue;
-            long location = (x + x_offset) * pixel_step + (y + y_offset) * line_length;
+            if (x >= m_display_width) continue;
+            long location = x * m_pixel_step + y * finfo.line_length;
             int idx = (x + y * frame_width) * 3;
             uint8_t r = *(frame + idx + 0);
             uint8_t g = *(frame + idx + 1);
             uint8_t b = *(frame + idx + 2);
-            *((uint16_t*)(fbp + location)) = rgb888_to_rgb565(r, g, b);
+            switch(m_pixel_step) {
+                case 2: {
+                    *((uint16_t*)(buffer + location)) = rgb888_to_rgb565(r, g, b);
+                    break;
+                }
+                case 3: {
+                    *((uint16_t*)(buffer + location + 0)) = b;
+                    *((uint16_t*)(buffer + location + 1)) = g;
+                    *((uint16_t*)(buffer + location + 2)) = r;
+                    break;
+                } 
+                case 4: {
+                    *((uint16_t*)(buffer + location + 0)) = b;
+                    *((uint16_t*)(buffer + location + 1)) = g;
+                    *((uint16_t*)(buffer + location + 2)) = r;
+                    *((uint16_t*)(buffer + location + 3)) = 0;
+                    break;
+                }
+                default:
+                    printf("Pixel depth %d is not supported!\n", m_pixel_step*8);
+                    return;
+            }
         }
     }
 }
 
-void draw_bgr_frame(
-    uint8_t *fbp,
-    int frame_width,
-    int frame_height,
-    int screen_width, 
-    int screen_height,
-    int x_offset,
-    int y_offset,
-    int line_length,
-    int pixel_step,
-    uint8_t *frame) {
+void draw_bgr_frame(int frame_width, int frame_height, uint8_t *frame) {
     for (int y = 0; y < frame_height; y++) {
-        if (y >= screen_height) continue;
+        if (y >= m_display_height) continue;
         for (int x = 0; x < frame_width; x++) {
-            if (x >= screen_width) continue;
-            long location = (x + x_offset) * pixel_step + (y + y_offset) * line_length;
+            if (x >= m_display_width) continue;
+            long location = x * m_pixel_step + y * finfo.line_length;
             int idx = (x + y * frame_width) * 3;
             uint8_t r = *(frame + idx + 2);
             uint8_t g = *(frame + idx + 1);
             uint8_t b = *(frame + idx + 0);
-            *((uint16_t*)(fbp + location)) = rgb888_to_rgb565(r, g, b);
+            switch(m_pixel_step) {
+                case 2: {
+                    *((uint16_t*)(buffer + location)) = rgb888_to_rgb565(r, g, b);
+                    break;
+                }
+                case 3: {
+                    *((uint16_t*)(buffer + location + 0)) = r;
+                    *((uint16_t*)(buffer + location + 1)) = g;
+                    *((uint16_t*)(buffer + location + 2)) = b;
+                    break;
+                } 
+                case 4: {
+                    *((uint16_t*)(buffer + location + 0)) = r;
+                    *((uint16_t*)(buffer + location + 1)) = g;
+                    *((uint16_t*)(buffer + location + 2)) = b;
+                    *((uint16_t*)(buffer + location + 3)) = 0;
+                    break;
+                }
+                default:
+                    printf("Pixel depth %d is not supported!\n", m_pixel_step*8);
+                    return;
+            }
         }
     }
 }
 
-void get_display_data(DisplayData *data) {
+void display_buffer() {
+    memcpy(fb_p, buffer, m_mmap_size);
+}
+
+int wait_for_vsync(int fd) {
+    int zero = 0, ret;
+
+    ret = ioctl(fd, FBIO_WAITFORVSYNC, &zero);
+    if (ret) {
+        perror("Error for FBIO_WAITFORVSYNC");
+		return ret;
+    }
+    return 0;
+}
+
+
+int get_display_data(DisplayData *data) {
+    
     int fd = open("/dev/fb0", O_RDWR);
     if (fd == -1) {
         perror("Failed to open framebuffer device");
+        return -1;
     }
-    
-    struct fb_fix_screeninfo finfo;
+     
     if (ioctl(fd, FBIOGET_FSCREENINFO, &finfo)) {
-        perror("FBIOGET_FSCREENINFO");
+        perror("Cannot FBIOGET_FSCREENINFO");
         close(fd);
+        return -1;
     }
     
-    struct fb_var_screeninfo vinfo;
     if (ioctl(fd, FBIOGET_VSCREENINFO, &vinfo)) {
-        perror("FBIOGET_VSCREENINFO");
+        perror("Cannot FBIOGET_VSCREENINFO");
         close(fd);
+        return -1;
     }
-    
-    long screen_size = vinfo.yres_virtual * finfo.line_length;
 
-    uint8_t *fbp = mmap(0, screen_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if (fbp == MAP_FAILED) {
+    
+    long screen_size = vinfo.yres * finfo.line_length;
+    long mmap_size = screen_size;
+
+    buffer = malloc(sizeof(uint8_t) * mmap_size);
+
+    fb_p = mmap(0, mmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (fb_p == MAP_FAILED) {
         perror(" Failed to map framebuffer device");
         close(fd);
+        return -1;
     }
 
+    m_display_width = vinfo.xres;
+    m_display_height = vinfo.yres;
+    m_pixel_step = vinfo.bits_per_pixel / 8;
+    m_screen_size = screen_size;
+    m_mmap_size = mmap_size;
+
     DisplayData display_data = {
-        .framebuffer_p = fbp,
-        .framebuffer_d = fd,
-        .width = vinfo.xres,
-        .height = vinfo.yres,
-        .x_offset = vinfo.xoffset,
-        .y_offset = vinfo.yoffset,
-        .pixel_step = vinfo.bits_per_pixel / 8,
+        .framebuffer_desc = fd,
+        .width = m_display_width,
+        .height = m_display_height,
+        .pixel_step = m_pixel_step,
         .line_length = finfo.line_length,
-        .screen_size = screen_size
+        .screen_size = m_screen_size,
+        .mmap_size = m_mmap_size
     };
 
     *data = display_data;
+    return 0;
 }
 
-void clean_up(uint8_t *fbp, int fbd, int screen_size) {
-    munmap(fbp, screen_size);
-    close(fbd);
+void clean_up(int fd) {
+    munmap(fb_p, m_mmap_size);
+    close(fd);
+    free(buffer);
 }
