@@ -1,5 +1,6 @@
 from pathlib import Path
 import csv
+import json
 import datetime
 
 class DataHandler:
@@ -29,10 +30,35 @@ class CSVHandler(DataHandler):
             writer.writerows(data["rows"])
             
     def read(self):
-        rows = []
-        with open(self.file_path, "r") as f:
-            reader = csv.reader(f)
-            fields = next(f)
-            for row in reader:
-                rows.append(row)
-        return fields, rows
+        try:
+            rows = []
+            with open(self.file_path, "r") as f:
+                reader = csv.reader(f)
+                fields = next(f)
+                for row in reader:
+                    rows.append(row)
+            return fields, rows
+        except csv.Error as e:
+            print(f"Error when reading csv file ({f}): {e}")
+        except Exception as e:
+            print(f"Error when trying to read csv file ({self.file_path}): {e}")
+    
+    
+class JSONHandler(DataHandler):
+    def __init__(self, path=None, file=None, folder=None):
+        super().__init__(path, file, folder)
+        self.file_path = Path(str(self.file_path) + ".json")
+        print(f"DataHandler is created for {self.file_path}")
+        
+    def save(self, data):
+        with open(self.file_path, "w") as f:
+            json.dump(data, f, indent=2)
+            
+    def read(self):
+        try:
+            with open(self.file_path, "r") as f:
+                data = json.load(f)
+            return data
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"Error when trying to decode json file ({self.file_path}): {e}")
+        

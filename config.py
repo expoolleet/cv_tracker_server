@@ -7,6 +7,7 @@ import numpy as np
 import struct
 import queue
 import multiprocessing as mp
+import json
 from pathlib import Path
 
 from src.frame_memory_share_handler import FrameMemoryShareHandler, FrameMemoryShareClient
@@ -27,8 +28,11 @@ from src.video_writer import VideoWriter
 from src.opengl_renderer import OpenGLRenderer, ProjectionViewModel
 from src.gpio import GPIOHandler
 from src.display_messager import DisplayMessager
+from src.file_based_event import FileBasedEvent
+
 from tracker.fast_mosse_tracker import FastMosseTracker
 from tracker.xor_tracker import XORTracker
+
 
 if os.getenv("DISPLAY") is None:
     os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = ''
@@ -37,6 +41,9 @@ if os.getenv("DISPLAY") is None:
 base_path = Path(__file__).resolve().parent / "debug"
 Path.mkdir(base_path, parents=True, exist_ok=True)
 base_path = str(base_path)
+
+with open(Path(__file__).resolve().parent / "camera_params.json", "r") as f:
+    camera_params = json.load(f)
 
 class CameraResolution:
     LORES = "lores"

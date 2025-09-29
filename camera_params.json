@@ -1,0 +1,7 @@
+{
+    "frame_rate": 60,
+    "size_main": [640, 480],
+    "size_lores": [640, 480],
+    "res": "lores",
+    "shared_name": "picamera"
+}

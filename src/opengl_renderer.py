@@ -293,8 +293,8 @@ class OpenGLRenderer:
         v_size = u_size
         
         y_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=y_size)
-        u_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=u_size, offset=y_size)
-        v_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=v_size, offset=y_size+u_size)
+        u_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=u_size, offset=y_size).reshape((h//2, w//2))
+        v_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=v_size, offset=y_size+u_size).reshape((h//2, w//2))
         uv_plane = np.dstack((u_plane, v_plane))
         
         glActiveTexture(GL_TEXTURE0)
@@ -304,6 +304,10 @@ class OpenGLRenderer:
         glActiveTexture(GL_TEXTURE1)
         glBindTexture(GL_TEXTURE_2D, self.uv_tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w // 2, h // 2, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, uv_plane)        
+        
+        err = glGetError()
+        if err != GL_NO_ERROR:
+            print("OpenGL error:", err)
         
         self.draw_canvas()       
         glfw.swap_buffers(self.window)
