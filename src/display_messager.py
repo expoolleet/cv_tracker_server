@@ -38,17 +38,13 @@ class DisplayMessager:
     def show_message(self, frame: np.ndarray) -> np.ndarray:        
         message: Message = self._get_message()
         if message is None:
-            return frame
-        
+            return frame    
         if message.is_displaying and time.time() - message.start_time > message.timeout:
             return frame
-
-        self._put_message_back(message)
-        
+        self._put_message_back(message)        
         if not message.is_displaying:
             message.is_displaying = True
             message.start_time = time.time()
-
         return cv2.putText(frame.copy(), message.message, self.message_position, self.font_face, self.font_scale, self.color, self.thickness)
     
     def clear_messages(self) -> None:
@@ -89,7 +85,3 @@ class DisplayMessager:
             self.messages_local_deque.append(message)
             return
         self.messages.append(message)
-        
-        
-        
-        

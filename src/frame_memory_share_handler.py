@@ -19,7 +19,7 @@ class FrameMemoryShareHandler:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type:
-            print(f"Exception in FrameMemoryShareHandler occured: {exc_type}, {exc_val}")
+            print(f"Exception in FrameMemoryShareHandler occured: {exc_type}, {exc_val.__cause__}")
             return False
         self.close()
         raise True
@@ -34,7 +34,10 @@ class FrameMemoryShareHandler:
         return self.memory_name
         
     def close(self) -> None:
-        self.frame_sm.close()
+        try:
+            self.frame_sm.close()
+        except FileNotFoundError:
+            pass
 
     def unlink(self) -> None:
         self.frame_sm.unlink()
@@ -42,16 +45,15 @@ class FrameMemoryShareHandler:
         
 class FrameMemoryShareClient:
     def __init__(self, memory_share_name: str, shape: tuple, dtype: np.dtype): 
-        self.frame_sm = shared_memory.SharedMemory(name=memory_share_name)
+        self.frame_sm = shared_memory.SharedMemory(name=memory_share_name, create=False)
         self.frame_buffer = np.ndarray(shape, dtype=dtype,buffer=self.frame_sm.buf)
-        self.lock = Lock()
     
     def __enter__(self):
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         if exc_type:
-            print(f"Exception in FrameMemoryShareClient occured: {exc_type}, {exc_val}")
+            print(f"Exception in FrameMemoryShareClient occured: {exc_type}, {exc_val.__cause__}")
             return False
         self.close()
         return True
@@ -63,6 +65,9 @@ class FrameMemoryShareClient:
         np.copyto(self.frame_buffer, frame)
         
     def close(self) -> None:
-        self.frame_sm.close()
+        try:
+            self.frame_sm.close()
+        except FileNotFoundError:
+            pass
     
         

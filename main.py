@@ -8,6 +8,7 @@ message_queue = mp.Queue()
 
 gpio_worker_thread = None
 tracking_process = None
+video_writer: threading.Thread = None
 
 ### functionality
 enable_uart = True
@@ -16,7 +17,7 @@ enable_debug = False
 enable_gpio = False
 enable_streaming_screen = False
 ###
-    
+
 latest_frame_lock = threading.Lock()
 latest_frame = None
 preview_frame = None
@@ -40,8 +41,9 @@ else:
     frame_shape = (int(camera_size[1] * 1.5), camera_size[0])
 frame_dtype = np.uint8
 
+no_frame_image = cv2.putText(np.zeros((480, 640, 4)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
 
-#frame_shared_memory_handler = None
+# frame_shared_memory_handler = None
 manager = mp.Manager()
 data_dict = manager.dict()
 tracker_dict = manager.dict()
@@ -51,7 +53,7 @@ tracker_size = camera_size_lores
 tracking_frame_size = camera_size_lores
 
 ### Tracker default parameters ###
-#--------------------------------#
+# --------------------------------#
 defualt_roi_size = 64
 current_roi_size = defualt_roi_size
 data_dict["current_roi"] = (int(tracker_size[0] // 2 - defualt_roi_size // 2), 
@@ -65,7 +67,7 @@ tracker_dict["alpha_smoothing"] = 0.9
 tracker_dict["max_corr"] = 0.5
 tracker_dict["sigma_factor"] = 0.05
 
-# Searching 
+# Searching
 xort_x_shift = 20
 xort_y_shift = 15
 xort_corel_target_modificator = 0.2
@@ -109,7 +111,6 @@ exit_event = mp.Event()
 wait_first_frame_event = mp.Event()
 
 FileBasedEvent.cleanup_all()
-is_camera_closed_event = FileBasedEvent(camera_params["shared_name"])#mp.Event()
 is_server_closed_event = FileBasedEvent("is_server_closed_event")
 
 main_loop_event = mp.Event()
@@ -179,8 +180,8 @@ def update_tracking(data):
         "fps": 0 }
     server.send_command_to_clients(Command.TRACKER_DATA, data_dict["tracker_data"])
     print(f'Update tracking with ROI: {data_dict["current_roi"]}, Kalman: {data["kalman"]}, Skip frames: {data["skip_frames"]}, Training images count: {data["training_images_count"]}, Alpha smoothing: {data["alpha_smoothing"]}, Max corr: {data["max_corr"]}, Sigma factor: {data["sigma_factor"]}')
-    
-        
+
+
 def start_stream_for_client(params):
     global stream_protocol, ffmpeg_port
     if server.check_client(params["ip"]):
@@ -191,8 +192,8 @@ def start_stream_for_client(params):
     server.add_pipe_to_client(params["ip"], pipe)
     threading.Thread(target=stream, args=(ffmpeg_hanlder, pipe, params["stream_size"],), daemon=True).start()
     print(f"Stream for {params['ip']} is started")
-    
-    
+
+
 def stop_stream_for_client(ip):
     if ip in server.clients and server.clients[ip] is None:
         print(f"Cannot close stop the stream for {ip}, because it is not opened.")
@@ -200,8 +201,8 @@ def stop_stream_for_client(ip):
     server.close_client_pipe(ip)
     server.clear_client(ip)
     print(f"Stream for {ip} is stoped")
-            
-               
+
+
 def show_camera_preview_by_client(data, play_preview_event):
     global camera_preview_process, camera_preview_clients, camera_preview_frame_rate
     if not isinstance(data["frame_rate"], int):
@@ -223,7 +224,7 @@ def show_camera_preview_by_client(data, play_preview_event):
     
     camera_preview_process = mp.Process(
         target=_camera_preview_loop, 
-        args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, display_messager_queue))
+        args=(play_preview_event, exit_event, sm_name, frame_shape, frame_dtype, display_messager_queue))
     print(f"Camera preview is starting by {data['ip']}")
     camera_preview_process.start()
 
@@ -240,11 +241,11 @@ def show_camera_preview(play_preview_event):
     
     camera_preview_process = mp.Process(
         target=_camera_preview_loop, 
-        args=(play_preview_event, exit_event, is_camera_closed_event, sm_name, frame_shape, frame_dtype, display_messager_queue))
+        args=(play_preview_event, exit_event, sm_name, frame_shape, frame_dtype, display_messager_queue))
     camera_preview_process.start()
     print("Camera preview was started")
-    
-    
+
+
 def stop_camera_preview_by_client(ip, play_preview_event):
     global camera_preview_process, camera_preview_clients
     if ip in camera_preview_clients:
@@ -280,8 +281,8 @@ def change_frame_borders(data):
         message_queue.put(KEEP_ASPECT_RATIO)
     else:
         message_queue.put(FREE_ASPECT_RATIO)
-     
-        
+
+
 def change_roi_with_byte_value(value, print_changed_roi_size=False):
     global current_roi_size, current_roi_size_byte_value
     a = 0
@@ -314,8 +315,8 @@ def draw_debug_info(frame):
             "crosshair_center": (camera_size[0] // 2, camera_size[1] // 2)})
         frame = processed_data["frame"]
     return frame
- 
-    
+
+
 def write_video(exit_event, fps, video_size):
     frame_time = 1 / fps
     with VideoWriter(path=base_path, fps=fps, size=video_size, bitrate="1.5M") as vw:
@@ -323,6 +324,18 @@ def write_video(exit_event, fps, video_size):
         while data_dict["tracker_initialized"] and not exit_event.is_set():   
             vw.write(draw_debug_info(yuv_frame))
             start_time = sleep(start_time, frame_time)
+
+
+def handle_video_writer():
+    global video_writer
+    tracker_initialized = data_dict.get("tracker_initialized", False)
+    if video_writer is None and tracker_initialized:
+        video_writer = threading.Thread(
+            target=write_video, 
+            args=(exit_event, video_writing_frame_rate, camera_size))
+        video_writer.start()
+    elif video_writer is not None and not tracker_initialized:
+        video_writer = None 
 
 
 def get_normal_roi(roi: list | tuple) -> np.ndarray:
@@ -336,7 +349,6 @@ def get_normal_roi(roi: list | tuple) -> np.ndarray:
 def _camera_preview_loop(
     play_preview_event, 
     exit_event, 
-    is_camera_closed_event, 
     shared_memory_name, 
     frame_shape, 
     frame_dtype, 
@@ -344,58 +356,52 @@ def _camera_preview_loop(
     ignore_interruption()
     global yuv_frame
     try:
-        with FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype) as sm_client: 
-            print(camera_size)
-            renderer = OpenGLRenderer(buffer_size=camera_size)
-            renderer.init_yuv2rgb_shader()
-            renderer.init_stream_texture_yuv2rgb()
-            renderer.init_texture_shader()
-            renderer.init_stream_texture()
-            no_frame_image = cv2.putText(np.zeros((480, 640, 4)), "No video", (90, 240), 2, 3, (255, 255, 255), 3)
-            display_messager = DisplayMessager(multiprocessing_shared_queue=display_messager_queue)
-            video_writer = None
-            frame_count = 0
-            start_time = time.time()
-            print("Camera preview loop is started")
-            FileBasedEvent("preview_started_event").set()
-            while not exit_event.is_set():
-                frame_count += 1
-                if not is_camera_closed_event.is_set():
-                    frame = sm_client.get_frame(False)
-                    yuv_frame = frame
-                
-                if not is_camera_closed_event.is_set():
-                    current_roi = data_dict.get("current_roi", (0, 0, 0, 0))  
-                
-                # Playing preview
-                if not play_preview_event.is_set():
-                    continue 
-                if not is_camera_closed_event.is_set():
-                    renderer.set_yuv_frame_drawings(get_normal_roi(current_roi) if bool(drawing_roi.value) else None, bool(drawing_crosshair.value))
-                    preview_frame = display_messager.show_message(frame)
-                    renderer.diplay_yuv_frame(preview_frame)  
-                else:
-                    renderer.display_rgb_frame(no_frame_image)
-                    
-                # Processing messages from main process
-                process_message_queue(renderer)
-                
-                start_time = sleep(start_time, camera_preview_frame_time.value)
-                
-                # vvv DEBUG AREA ONLY vvv
-                if not enable_debug:
-                    continue
-                tracker_initialized = data_dict.get("tracker_initialized", False)
-                if video_writer is None and tracker_initialized:
-                    video_writer = threading.Thread(
-                        target=write_video, 
-                        args=(exit_event, video_writing_frame_rate, camera_size))
-                    video_writer.start()
-                elif video_writer is not None and not tracker_initialized:
-                    video_writer = None 
+        sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
+        renderer = OpenGLRenderer(buffer_size=camera_size)
+        renderer.init_yuv2rgb_shader()
+        renderer.init_stream_texture_yuv2rgb()
+        renderer.init_texture_shader()
+        renderer.init_stream_texture()
+        display_messager = DisplayMessager(multiprocessing_shared_queue=display_messager_queue)
+        frame_count = 0
+        start_time = time.time()
+        print("Camera preview loop is started")
+        is_camera_closed_event = FileBasedEvent("is_camera_closed_event")
+        preview_started_event = FileBasedEvent("preview_started_event")
+        while not exit_event.is_set():     
+            if not play_preview_event.is_set():
+                time.sleep(0.01) 
+                continue 
+            frame_count += 1      
+            if not is_camera_closed_event.is_set():
+                if sm_client is None:
+                    sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
+                frame = sm_client.get_frame(False)
+                yuv_frame = frame
+                current_roi = data_dict.get("current_roi", (0, 0, 0, 0))  
+                renderer.set_yuv_frame_drawings(get_normal_roi(current_roi) if bool(drawing_roi.value) else None, bool(drawing_crosshair.value))
+                preview_frame = display_messager.show_message(frame)
+                renderer.diplay_yuv_frame(preview_frame)  
+            else:
+                if sm_client is not None:
+                    try:
+                        sm_client.close()
+                    except FileNotFoundError:
+                        pass
+                    sm_client = None
+                renderer.display_rgb_frame(no_frame_image)  
+
+            process_message_queue(renderer) # Processing messages from main process
+
+            if enable_debug:
+                handle_video_writer()
+            if not preview_started_event.is_set():
+                preview_started_event.set() 
+            start_time = sleep(start_time, camera_preview_frame_time.value)
     except Exception as e:
         print(f"Camera preview loop error: {e}")
     finally:
+        sm_client.close()
         renderer.close()
 
 
@@ -423,8 +429,8 @@ def stream(ffmpeg_hanlder, pipe, stream_size):
             ffmpeg_hanlder.wait_for_frametime(start)
     except BrokenPipeError as e:
         print(f"BrokenPipeError: {e}")
-   
-   
+
+
 def toggle_roi(enabled):
     try:
         if enabled:
@@ -436,7 +442,7 @@ def toggle_roi(enabled):
     except Exception as e:
         print(e)
     drawing_roi.value = int(enabled)
-            
+
 
 def toggle_crosshair(enabled):
     try:
@@ -462,15 +468,15 @@ def stop_tracking(from_uart=False):
         if not from_uart:
             server.send_command_to_clients(Command.STOP_TRACKING)
         display_messager.add_message("TRACKER - OFF")
-        
-        
+
+
 def request_tracking_client():
     tracker_initialized = data_dict.get("tracker_initialized", False)
     if tracker_initialized:
         return
     server.send_command_to_clients(Command.REQUEST_TRACKING)
-    
-    
+
+
 def request_tracking_server():
     tracker_initialized = data_dict.get("tracker_initialized", False)
     tracker_requested = data_dict.get("tracker_requested", False)
@@ -483,8 +489,8 @@ def request_tracking_server():
         data_dict["tracker_initialized"] = False
         reset_roi()
     request_tracking_client()
-    
-    
+
+
 def get_tracker():
     if current_tracker == Tracker.MOSSE:
         return cv2.legacy.TrackerMOSSE_create()
@@ -528,59 +534,58 @@ def get_xy_deviations():
 def handle_interruption():
     signal.signal(signal.SIGINT, lambda sig, frame: close_server()) # handles CTRL+C or similar program interruption...
     signal.signal(signal.SIGTERM, lambda sig, frame: close_server())
-    
+
 def ignore_interruption():
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-        
+
 def start_main_loop(shared_memory_name):  
     global latest_frame
     try:
-        with FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype) as sm_client: 
-            wait_in_seconds_to_send_tracker_data = 0.3
-            start_timer_tracker_data = time.time()   
-            data_handler = None         
-            xy_deviations = []
-            target_frametime = camera_frame_time
-            start_time = time.time()
-            print("Main loop is started.\n")
-            while not main_loop_event.is_set(): 
-                frame = sm_client.get_frame()
-                if frame is None:
-                    continue
-                with latest_frame_lock:
-                    latest_frame = frame
-                    
-                success = data_dict.get("success", False)
-                tracker_data = data_dict.get("tracker_data", {})
-                tracker_initialized = data_dict.get("tracker_initialized", False)
-                if tracker_initialized:
-                    if success:
-                        if time.time() - start_timer_tracker_data > wait_in_seconds_to_send_tracker_data:
-                            start_timer_tracker_data = time.time() 
-                            server.send_command_to_clients(Command.TRACKER_DATA, tracker_data)
-                    else:        
-                        tracker_data["roi"] = ROI_ZEROS  
+        sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
+        wait_in_seconds_to_send_tracker_data = 0.3
+        start_timer_tracker_data = time.time()   
+        data_handler = None         
+        xy_deviations = []
+        target_frametime = camera_frame_time
+        start_time = time.time()
+        print("Main loop is started.\n")
+        while not main_loop_event.is_set(): 
+            frame = sm_client.get_frame()
+            with latest_frame_lock:
+                latest_frame = frame
+                
+            success = data_dict.get("success", False)
+            tracker_data = data_dict.get("tracker_data", {})
+            tracker_initialized = data_dict.get("tracker_initialized", False)
+            if tracker_initialized:
+                if success:
+                    if time.time() - start_timer_tracker_data > wait_in_seconds_to_send_tracker_data:
+                        start_timer_tracker_data = time.time() 
                         server.send_command_to_clients(Command.TRACKER_DATA, tracker_data)
-                dx, dy = get_xy_deviations()
-                if enable_debug:
-                    if tracker_initialized:
-                        xy_deviations.append([dx, dy])
-                        if data_handler is None:
-                            data_handler = CSVHandler(base_path)
-                    if not tracker_initialized and data_handler is not None:
-                        data_handler.save({"fields": ["dx", "dy"], "rows": xy_deviations})
-                        xy_deviations.clear()
-                        data_handler = None
-                if enable_uart:
-                    packet = prepare_uart_data([*uart_coefs, dx, dy])
-                    with uart_lock:   
-                        serial_transmit_binary(packet)
-                if not wait_first_frame_event.is_set():
-                    wait_first_frame_event.set()
-                    
-                start_time = sleep(start_time, target_frametime)
+                else:        
+                    tracker_data["roi"] = ROI_ZEROS  
+                    server.send_command_to_clients(Command.TRACKER_DATA, tracker_data)
+            dx, dy = get_xy_deviations()
+            if enable_debug:
+                if tracker_initialized:
+                    xy_deviations.append([dx, dy])
+                    if data_handler is None:
+                        data_handler = CSVHandler(base_path)
+                if not tracker_initialized and data_handler is not None:
+                    data_handler.save({"fields": ["dx", "dy"], "rows": xy_deviations})
+                    xy_deviations.clear()
+                    data_handler = None
+            if enable_uart:
+                packet = prepare_uart_data([*uart_coefs, dx, dy])
+                with uart_lock:   
+                    serial_transmit_binary(packet)
+            if not wait_first_frame_event.is_set():
+                wait_first_frame_event.set()
+                
+            start_time = sleep(start_time, target_frametime)
     except Exception as e:
+        sm_client.close()
         if is_server_closing.value != 1:
             print(f"An error occurred in the main loop: {e}")
             restart_s = 1
@@ -591,44 +596,44 @@ def start_main_loop(shared_memory_name):
 def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_frametime, wait_first_frame_event, exit_event):
     ignore_interruption()
     wait_first_frame_event.wait()
-    with FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype) as sm_client:
-        fps_counter = FPSCounter()
-        try:
-            start_time = time.time()
-            while not exit_event.is_set():
-                tracker_requested = data_dict.get("tracker_requested", False)
-                tracker_initialized = data_dict.get("tracker_initialized", False)
-                current_roi = data_dict.get("current_roi", (0, 0, 0, 0))
-                frame = convert_frame_to_gray(sm_client.get_frame())
-
-                with roi_lock:
-                    if tracker_requested:
-                        if not tracker_initialized:    
-                            tracker = get_tracker()  
-                            try:
-                                tracker.init(frame, current_roi)
-                                data_dict["tracker_initialized"] = True
-                                print("Tracker reinitialized with ROI:", current_roi)
-                                data_dict["tracker_requested"] = False
-                                display_messager.add_message("TRACKER - ON")
-                            except Exception as e:
-                                print(f"Error initializing tracker with ROI {current_roi}: {e}")
-                                data_dict["tracker_initialized"] = False
-                    if data_dict["tracker_initialized"]:
-                        success, bbox, _ = tracker.update(frame)
-                        fps = fps_counter.update(print_fps=False)
-
-                        if success:
-                            data_dict["current_roi"] = tuple(map(int, bbox))
-                        elif data_dict["success"]:
-                            reset_roi()
-                        data_dict["success"] = success
-                        td = tracker.get_tracker_data()
-                        td["fps"] = int(fps)
-                        data_dict["tracker_data"] = td
-                start_time = sleep(start_time, target_frametime)
-        except Exception as e:
-            print(f"Exception occured in tracking process: {e}")
+    sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
+    fps_counter = FPSCounter()
+    try:
+        start_time = time.time()
+        while not exit_event.is_set():
+            tracker_requested = data_dict.get("tracker_requested", False)
+            tracker_initialized = data_dict.get("tracker_initialized", False)
+            current_roi = data_dict.get("current_roi", (0, 0, 0, 0))
+            frame = convert_frame_to_gray(sm_client.get_frame())
+            with roi_lock:
+                if tracker_requested:
+                    data_dict["tracker_requested"] = False
+                    if tracker_initialized:
+                        continue        
+                    tracker = get_tracker()  
+                    try:
+                        tracker.init(frame, current_roi)
+                        data_dict["tracker_initialized"] = True
+                        print("Tracker initialized with ROI:", current_roi)
+                    except Exception as e:
+                        print(f"Error initializing tracker with ROI {current_roi}: {e}")
+                        continue
+                    display_messager.add_message("TRACKER - ON")
+                if data_dict["tracker_initialized"]:
+                    success, bbox, _ = tracker.update(frame)
+                    fps = fps_counter.update(print_fps=False)
+                    if success:
+                        data_dict["current_roi"] = tuple(map(int, bbox))
+                    elif data_dict["success"]: # previous frame state
+                        reset_roi()
+                    data_dict["success"] = success
+                    td = tracker.get_tracker_data()
+                    td["fps"] = int(fps)
+                    data_dict["tracker_data"] = td
+            start_time = sleep(start_time, target_frametime)
+    except Exception as e:
+        print(f"Exception occured in tracking process: {e}")
+        sm_client.close()
 
 
 def close_server():

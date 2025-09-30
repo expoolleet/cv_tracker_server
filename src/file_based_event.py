@@ -16,8 +16,6 @@ class FileBasedEvent:
     def wait(self) -> None:
         while not self.is_set():
             time.sleep(0.01)
-        if self.is_set():
-            self.clear()
     
     def clear(self) -> None:
         if os.path.exists(self.event_name):
