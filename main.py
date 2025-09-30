@@ -346,6 +346,18 @@ def get_normal_roi(roi: list | tuple) -> np.ndarray:
     return np.array([x, y, w, h], dtype=np.float32)
 
 
+def get_drawings_color():
+    tracker_initialized = data_dict.get("tracker_initialized", False)
+    if tracker_initialized:
+        tracking_success = data_dict.get("success", False)
+        if tracking_success:
+            return np.array([1, 0, 0], dtype=np.float32)
+        else:
+            return np.array([1, 0.9, 0], dtype=np.float32)
+    else:
+        return np.array([1, 1, 1], dtype=np.float32)
+
+
 def _camera_preview_loop(
     play_preview_event, 
     exit_event, 
@@ -379,7 +391,11 @@ def _camera_preview_loop(
                 frame = sm_client.get_frame(False)
                 yuv_frame = frame
                 current_roi = data_dict.get("current_roi", (0, 0, 0, 0))  
-                renderer.set_yuv_frame_drawings(get_normal_roi(current_roi) if bool(drawing_roi.value) else None, bool(drawing_crosshair.value))
+                renderer.set_yuv_frame_drawings(
+                    get_normal_roi(current_roi) if bool(drawing_roi.value) else None,
+                    bool(drawing_crosshair.value),
+                    get_drawings_color(),
+                )
                 preview_frame = display_messager.show_message(frame)
                 renderer.diplay_yuv_frame(preview_frame)  
             else:

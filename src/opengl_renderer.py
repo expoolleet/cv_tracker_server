@@ -48,19 +48,16 @@ _yuv2rgb_fragment_code = """
 
     uniform sampler2D yTex;
     uniform sampler2D uvTex;
-    //uniform sampler2D uTex;
-    //uniform sampler2D vTex;
     uniform int drawing_crosshair;
-
     uniform vec4 roi;
+    uniform vec3 rectangle_color;
+    uniform vec3 crosshair_color;
 
     varying vec2 uv;
 
     vec3 yuv2rgb();
     vec3 draw_rectangle(vec3 color, float x, float y, float w, float h);
     vec3 draw_crosshair(vec3 color, float size, float thickness);
-    vec3 rectangle_color = vec3(1.0, 1.0, 1.0);
-    vec3 crosshair_color = vec3(1.0, 1.0, 1.0);
     float crosshair_size = 0.012;
     float crosshair_thickness = 0.0025;
 
@@ -109,8 +106,6 @@ _yuv2rgb_fragment_code = """
         vec2 uv_plane = texture2D(uvTex, pos).ra;
         float u = uv_plane.x - 0.5;
         float v = uv_plane.y - 0.5;
-        //float u = texture2D(uTex, pos).r - 0.5;
-        //float v = texture2D(vTex, pos).r - 0.5; 
 
         float r = y + 1.5748 * v;
         float g = y - 0.187324 * u - 0.468124 * v;
@@ -138,9 +133,9 @@ class OpenGLRenderer:
         self.color_attrib = 1
         self.textures = []
         self.buffers = []
-        
+
         self.context_lock = threading.Lock()
-        
+
         glfw.init()
         self.monitor = glfw.get_primary_monitor()
         self.mode = glfw.get_video_mode(self.monitor)
@@ -149,52 +144,47 @@ class OpenGLRenderer:
         glfw.window_hint(glfw.CLIENT_API, glfw.OPENGL_ES_API)
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 2)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 0)
-        
+
         # setup constants
         self.buffer_width = buffer_size[0]
         self.buffer_height = buffer_size[1]
         self.screen_width = self.mode.size.width
         self.screen_height = self.mode.size.height
         print(f"Display parameters:\nWidth: {self.screen_width}\nHeight: {self.screen_height}\nRefresh rate: {self.mode.refresh_rate}")
-        
+
         self.window = glfw.create_window(self.screen_width, self.screen_height, "Preview", None, None)
         glfw.set_window_pos(self.window, window_x_offset, window_y_offset)
         glfw.set_input_mode(self.window, glfw.CURSOR, glfw.CURSOR_DISABLED)
         glfw.make_context_current(self.window)
         glfw.swap_interval(int(vsync))
-        
+
         self.create_canvas()     
         glClearColor(*clear_color)
-    
-    
+
     def init_yuv2rgb_shader(self) -> None:
         self.create_yuv2rgb_shader_program()
         self.init_stream_texture_yuv2rgb()
-        
-        
+
     def init_texture_shader(self) -> None:
         self.create_texture_shader()
         self.init_stream_texture()
-        
-    
+
     def create_texture_shader(self) -> None:
         vertex_module = create_shader_module(_vertex_code, GL_VERTEX_SHADER)
         fragment_module = create_shader_module(_texture_fragment_code, GL_FRAGMENT_SHADER)
         self.texture_shader = compileProgram(vertex_module, fragment_module)
-      
+
         glDeleteShader(vertex_module)
         glDeleteShader(fragment_module)
-    
-    
+
     def create_yuv2rgb_shader_program(self) -> None:
         vertex_module = create_shader_module(_vertex_code, GL_VERTEX_SHADER)
         fragment_module = create_shader_module(_yuv2rgb_fragment_code, GL_FRAGMENT_SHADER)
         self.yuv2rgb_shader = compileProgram(vertex_module, fragment_module)    
-        
+
         glDeleteShader(vertex_module)
         glDeleteShader(fragment_module)
-        
-    
+
     def get_keep_ratio_scale_matrix(self) -> np.ndarray:
         screen_aspect = self.screen_width / self.screen_height
         buffer_aspect = self.buffer_width / self.buffer_height
@@ -212,8 +202,7 @@ class OpenGLRenderer:
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0]
         ], dtype=np.float32)
-        
-        
+
     def get_free_ratio_scale_matrix(self) -> np.ndarray:
         return np.array([
             [1.0, 0.0, 0.0, 0.0],
@@ -221,14 +210,13 @@ class OpenGLRenderer:
             [0.0, 0.0, 1.0, 0.0],
             [0.0, 0.0, 0.0, 1.0]
         ], dtype=np.float32)
-        
-        
+
     def init_stream_texture_yuv2rgb(self) -> None:
         glUseProgram(self.yuv2rgb_shader)
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "yTex"), 0)
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "uvTex"), 1)
         glUniformMatrix4fv(glGetUniformLocation(self.yuv2rgb_shader, "model_view_projection"), 1, GL_FALSE, self.get_keep_ratio_scale_matrix())
-        
+
         self.y_tex, self.uv_tex = glGenTextures(2)
         self.textures.append(self.y_tex)
         self.textures.append(self.uv_tex)
@@ -238,16 +226,14 @@ class OpenGLRenderer:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, self.buffer_width, self.buffer_height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
 
-        
         glBindTexture(GL_TEXTURE_2D, self.uv_tex)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, self.buffer_width // 2, self.buffer_height // 2, 0, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, None)
-        
+
         glBindTexture(GL_TEXTURE_2D, 0)
-        
-        
+
     def init_stream_texture(self):
         glUseProgram(self.texture_shader)
         glUniform1i(glGetUniformLocation(self.texture_shader, "tex"), 0)
@@ -260,8 +246,7 @@ class OpenGLRenderer:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, self.buffer_width, self.buffer_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
         glBindTexture(GL_TEXTURE_2D, 0)
-        
-    
+
     def change_view_projection_model(self, model: str) -> None:
         if model == ProjectionViewModel.KEEP_RATIO:
             glUseProgram(self.yuv2rgb_shader)
@@ -274,60 +259,57 @@ class OpenGLRenderer:
             glUseProgram(self.texture_shader)
             glUniformMatrix4fv(glGetUniformLocation(self.texture_shader, "model_view_projection"), 1, GL_FALSE, self.get_free_ratio_scale_matrix())
 
-    
-    def set_yuv_frame_drawings(self, roi: np.ndarray = None, drawing_crosshair=True) -> None:
+    def set_yuv_frame_drawings(self, roi: np.ndarray = None, drawing_crosshair=True, color=np.array([1, 1, 1], dtype=np.float32)) -> None:
         glUseProgram(self.yuv2rgb_shader)
         if roi is None:
             roi = np.array([0, 0, 0, 0], dtype=np.float32)
         glUniform4fv(glGetUniformLocation(self.yuv2rgb_shader, "roi"), 1, roi)
+        glUniform3fv(glGetUniformLocation(self.yuv2rgb_shader, "rectangle_color"), 1, color)
+        glUniform3fv(glGetUniformLocation(self.yuv2rgb_shader, "crosshair_color"), 1, color)
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "drawing_crosshair"), int(drawing_crosshair))
-    
-    
+
     def diplay_yuv_frame(self, frame_yuv: np.ndarray) -> None:
         glUseProgram(self.yuv2rgb_shader)
         glClear(GL_COLOR_BUFFER_BIT)
-        
+
         w, h = (self.buffer_width, self.buffer_height)
         y_size = w * h
         u_size = w * h // 4
         v_size = u_size
-        
+
         y_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=y_size)
         u_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=u_size, offset=y_size).reshape((h//2, w//2))
         v_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=v_size, offset=y_size+u_size).reshape((h//2, w//2))
         uv_plane = np.dstack((u_plane, v_plane))
-        
+
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.y_tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_LUMINANCE, GL_UNSIGNED_BYTE, y_plane)
-        
+
         glActiveTexture(GL_TEXTURE1)
         glBindTexture(GL_TEXTURE_2D, self.uv_tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w // 2, h // 2, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, uv_plane)        
-        
+
         err = glGetError()
         if err != GL_NO_ERROR:
             print("OpenGL error:", err)
-        
+
         self.draw_canvas()       
         glfw.swap_buffers(self.window)
-        
-        
+
     def display_rgb_frame(self, frame: np.ndarray) -> None:
         glUseProgram(self.texture_shader)
         glClear(GL_COLOR_BUFFER_BIT)
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.rgb_tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.buffer_width, self.buffer_height, GL_RGBA, GL_UNSIGNED_BYTE, frame)
-        
+
         self.draw_canvas()
         glfw.swap_buffers(self.window)
-        
-        
+
     def read_buffer(self, buffer: np.ndarray) -> None:
         glReadPixels(0, 0, self.screen_width, self.screen_height, GL_RGBA, GL_UNSIGNED_BYTE, buffer)
-      
-        
+
     def create_canvas(self) -> None:      
         self.canvas_vertex_buffer, self.canvas_element_buffer = glGenBuffers(2)
         self.buffers.append(self.canvas_vertex_buffer)
@@ -335,16 +317,15 @@ class OpenGLRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self.canvas_vertex_buffer)
         glBufferData(GL_ARRAY_BUFFER, _canvas_vertex_points.nbytes, _canvas_vertex_points, GL_STATIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
-        
+
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.canvas_element_buffer)
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, _canvas_vertex_indeces.nbytes, _canvas_vertex_indeces, GL_STATIC_DRAW)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
-        
-        
+
     def draw_canvas(self) -> None:
         glBindBuffer(GL_ARRAY_BUFFER, self.canvas_vertex_buffer)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.canvas_element_buffer)
-        
+
         # xy attribute
         offset = 0
         position_attribute_index = 0
@@ -358,15 +339,14 @@ class OpenGLRenderer:
         texture_coordinates_attribute_index = 1
         glVertexAttribPointer(texture_coordinates_attribute_index, size, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(offset))
         glEnableVertexAttribArray(texture_coordinates_attribute_index)
-        
+
         glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, None)
-        
+
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
         glDisableVertexAttribArray(position_attribute_index)
         glDisableVertexAttribArray(texture_coordinates_attribute_index)
-        
-        
+
     def close(self) -> None:
         if self.yuv2rgb_shader:
             glDeleteProgram(self.yuv2rgb_shader)
@@ -376,4 +356,3 @@ class OpenGLRenderer:
         glDeleteTextures(len(self.textures), self.textures)
         glfw.destroy_window(self.window)
         glfw.terminate()
-        
