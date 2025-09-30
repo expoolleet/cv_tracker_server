@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from collections import deque
 import queue
 
-MESSAGES_MACOUNT = 10
+MESSAGES_MAX_COUNT: int = 10
 
 @dataclass
 class Message:
@@ -19,41 +19,44 @@ class DisplayMessager:
         if multiprocessing_shared_queue is not None:
             self.is_multiprocessing: bool = True
             self.messages_mp: object = multiprocessing_shared_queue
-            self.messages_local_deque: deque[Message] = deque(maxlen=MESSAGES_MACOUNT)
+            self.messages_local_deque: deque[Message] = deque(maxlen=MESSAGES_MAX_COUNT)
         else:
             self.messages_mp = None
             self.messages_local_deque = None
-        self.messages: deque[Message] = deque(maxlen=MESSAGES_MACOUNT)
+        self.messages: deque[Message] = deque(maxlen=MESSAGES_MAX_COUNT)
         self.message_position: tuple[int, int] = message_position
         self.font_face: int = 2
         self.font_scale: float = 1
         self.color: tuple[int, int, int] = (255, 255, 255)
         self.thickness: float = 2
-        self.short_timeout: float = 0.25
-           
+        self.short_timeout: float = 0.1
+        self.message_count: int = 0
+
     def add_message(self, message_text: str, timeout: float = 2) -> None:
         message = Message(message_text, timeout, False, 0)
         self._put_message(message)
-        
+
     def show_message(self, frame: np.ndarray) -> np.ndarray:        
         message: Message = self._get_message()
         if message is None:
             return frame    
         if message.is_displaying and time.time() - message.start_time > message.timeout:
-            return frame
+            self.message_count -= 1
+            return self.show_message(frame)
         self._put_message_back(message)        
         if not message.is_displaying:
             message.is_displaying = True
             message.start_time = time.time()
         return cv2.putText(frame.copy(), message.message, self.message_position, self.font_face, self.font_scale, self.color, self.thickness)
-    
+
     def clear_messages(self) -> None:
         if self.is_multiprocessing:
             while not self.messages_mp.empty():
-                self.messages_mp.get()
+                self.messages_mp.get(block=False)
             self.messages_local_deque.clear()
         self.messages.clear()
-    
+        self.message_count = 0
+
     def _get_message(self) -> Message:
         if self.is_multiprocessing:
             try:
@@ -73,13 +76,22 @@ class DisplayMessager:
                 message.timeout = self.short_timeout
             return message
         return None
-    
+
     def _put_message(self, message: Message) -> None:
+        self.message_count += 1
         if self.is_multiprocessing:
             self.messages_mp.put(message)
+            if self.message_count > MESSAGES_MAX_COUNT:
+                self.message_count = MESSAGES_MAX_COUNT
+                try:
+                    self.messages_mp.get(block=False)
+                except Exception:
+                    pass
             return
+        if self.message_count > MESSAGES_MAX_COUNT:
+            self.message_count = MESSAGES_MAX_COUNT
         self.messages.appendleft(message)
-            
+
     def _put_message_back(self, message: Message) -> None:
         if self.is_multiprocessing:
             self.messages_local_deque.append(message)

@@ -111,7 +111,7 @@ exit_event = mp.Event()
 wait_first_frame_event = mp.Event()
 
 FileBasedEvent.cleanup_all()
-is_server_closed_event = FileBasedEvent("is_server_closed_event")
+server_closed_event = FileBasedEvent("server_closed_event")
 
 main_loop_event = mp.Event()
 got_frame_event = threading.Event()
@@ -366,14 +366,14 @@ def _camera_preview_loop(
         frame_count = 0
         start_time = time.time()
         print("Camera preview loop is started")
-        is_camera_closed_event = FileBasedEvent("is_camera_closed_event")
+        camera_closed_event = FileBasedEvent("camera_closed_event")
         preview_started_event = FileBasedEvent("preview_started_event")
         while not exit_event.is_set():     
             if not play_preview_event.is_set():
                 time.sleep(0.01) 
                 continue 
             frame_count += 1      
-            if not is_camera_closed_event.is_set():
+            if not camera_closed_event.is_set():
                 if sm_client is None:
                     sm_client = FrameMemoryShareClient(shared_memory_name, frame_shape, frame_dtype)
                 frame = sm_client.get_frame(False)
@@ -639,6 +639,8 @@ def tracking(shared_memory_name, frame_shape, frame_dtype, data_dict, target_fra
 def close_server():
     if is_server_closing.value == 1:
         return
+    server_closed_event.set()
+
     is_server_closing.value = 1
     server.send_command_to_clients(Command.DISCONNECT)
     print('\n1. Disconnecting all clients if any...')
@@ -653,7 +655,7 @@ def close_server():
     exit_event.set()
 
     join_timeout = 0.5
-    
+
     tracking_process.join(timeout=join_timeout)
     tracking_process.terminate()
 
@@ -662,14 +664,13 @@ def close_server():
 
     frame_shared_memory_handler.close()
     frame_shared_memory_handler.unlink()
-    
+
     if gpio_worker_thread:
         gpio_worker_thread.join(timeout=join_timeout) 
 
     manager.shutdown()
     cv2.destroyAllWindows()
-    
-    is_server_closed_event.set()
+
     print('Server is closed.')               
 
 

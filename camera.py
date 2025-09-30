@@ -42,8 +42,8 @@ print(f"Current exposition time: {controls['ExposureTime']} мкс")
 print(f"Current analogue gain: {controls['AnalogueGain']}")
 print(f"Current digital gain: {controls['DigitalGain']}")
 
-is_camera_closed_event = FileBasedEvent("is_camera_closed_event")
-is_server_closed_event = FileBasedEvent("is_server_closed_event")
+camera_closed_event = FileBasedEvent("camera_closed_event")
+server_closed_event = FileBasedEvent("server_closed_event")
 
 def sleep(start_time, time_s):
     try:
@@ -56,7 +56,7 @@ def sleep(start_time, time_s):
         return time.time()
 
 def clean_up():
-    is_camera_closed_event.set()
+    camera_closed_event.set()
     camera.close()
     try:
         sm_handler.set_frame(empty_frame)
@@ -88,14 +88,14 @@ if __name__ == "__main__":
                 time.sleep(0.01)
                 continue
 
-            if is_server_closed_event.is_set():
+            if server_closed_event.is_set():
                 clean_up()
 
             sm_handler.set_frame(frame)
             start_time = sleep(start_time, target_frametime)
 
-            if is_camera_closed_event.is_set():
-                is_camera_closed_event.clear()
+            if camera_closed_event.is_set():
+                camera_closed_event.clear()
     except Exception as e:
         print(f"Exception occured in camera module: {e}")
     finally:
