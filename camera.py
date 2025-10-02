@@ -3,10 +3,16 @@ import signal
 import json
 import time
 import numpy as np
-from src.picamera import init_camera_defaults
+from src.picamera import Picamera2, init_camera_defaults
 from src.frame_memory_share_handler import FrameMemoryShareHandler
 from src.file_based_event import FileBasedEvent
 from pathlib import Path
+
+"""
+
+    Picam service. Add it in systemd services.
+
+"""
 
 with open(Path(__file__).resolve().parent / "camera_params.json", "r") as f:
     camera_params = json.load(f)
@@ -28,20 +34,26 @@ sm_handler = FrameMemoryShareHandler(frame_shape, frame_dtype, camera_params["sh
 target_frametime = 1 / camera_frame_rate
 empty_frame = np.zeros(frame_shape, dtype=np.uint8)
 
+
+camera = None
 try:
-    camera = init_camera_defaults(size_main=camera_size_main, size_lores=camera_size_lores, frame_rate=camera_frame_rate)
+    if not Picamera2.global_camera_info():
+        raise RuntimeError("No camera detected")
+    camera = init_camera_defaults(
+        size_main=camera_size_main, size_lores=camera_size_lores, frame_rate=camera_frame_rate
+    )
     camera.start()
 except RuntimeError as e:
     print(e)
     sys.exit(1)
 
-sm_creation_timeout = 1
 
 controls = camera.capture_metadata()
 print(f"Current exposition time: {controls['ExposureTime']} мкс")
 print(f"Current analogue gain: {controls['AnalogueGain']}")
 print(f"Current digital gain: {controls['DigitalGain']}")
 
+FileBasedEvent.cleanup_all()
 camera_closed_event = FileBasedEvent("camera_closed_event")
 server_closed_event = FileBasedEvent("server_closed_event")
 
@@ -70,15 +82,15 @@ def signal_handler(signum, frame):
     clean_up()
     sys.exit(1)
 
-def capture_frame(resolution="lores", timeout=1):
+def capture_frame(resolution="lores", timeout=3):
     signal.alarm(timeout)
     frame = camera.capture_array(resolution)
     signal.alarm(0)
     return frame
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGALRM, signal_handler)
     FileBasedEvent("preview_started_event").wait()
+    signal.signal(signal.SIGALRM, signal_handler)
     start_time = time.time()
     print("Camera is working")
     try:  

@@ -3,13 +3,14 @@ os.environ["PYOPENGL_PLATFORM"]="egl"
 import glfw
 from OpenGL.GL import *
 from OpenGL.GL.shaders import compileShader, compileProgram
-
 import numpy as np
 import threading
-import time
+
 
 def create_shader_module(shader_source_code, shader_type):
     return compileShader(shader_source_code, shader_type)
+
+# shader_binaries_dir =
 
 clear_color = (0, 0, 0, 1)
 
@@ -63,7 +64,7 @@ _yuv2rgb_fragment_code = """
 
     float rectangle_vertical_thickness = 0.0025;
     float rectangle_horizontal_thickness = 0.003; //rectangle_vertical_thickness * 1.2
-
+    
     void main() {
 
         vec3 rgb = yuv2rgb();
@@ -173,7 +174,6 @@ class OpenGLRenderer:
         vertex_module = create_shader_module(_vertex_code, GL_VERTEX_SHADER)
         fragment_module = create_shader_module(_texture_fragment_code, GL_FRAGMENT_SHADER)
         self.texture_shader = compileProgram(vertex_module, fragment_module)
-
         glDeleteShader(vertex_module)
         glDeleteShader(fragment_module)
 
@@ -181,9 +181,9 @@ class OpenGLRenderer:
         vertex_module = create_shader_module(_vertex_code, GL_VERTEX_SHADER)
         fragment_module = create_shader_module(_yuv2rgb_fragment_code, GL_FRAGMENT_SHADER)
         self.yuv2rgb_shader = compileProgram(vertex_module, fragment_module)    
-
         glDeleteShader(vertex_module)
         glDeleteShader(fragment_module)
+
 
     def get_keep_ratio_scale_matrix(self) -> np.ndarray:
         screen_aspect = self.screen_width / self.screen_height
@@ -216,7 +216,6 @@ class OpenGLRenderer:
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "yTex"), 0)
         glUniform1i(glGetUniformLocation(self.yuv2rgb_shader, "uvTex"), 1)
         glUniformMatrix4fv(glGetUniformLocation(self.yuv2rgb_shader, "model_view_projection"), 1, GL_FALSE, self.get_keep_ratio_scale_matrix())
-
         self.y_tex, self.uv_tex = glGenTextures(2)
         self.textures.append(self.y_tex)
         self.textures.append(self.uv_tex)
@@ -225,13 +224,11 @@ class OpenGLRenderer:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE, self.buffer_width, self.buffer_height, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, None)
-
         glBindTexture(GL_TEXTURE_2D, self.uv_tex)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA, self.buffer_width // 2, self.buffer_height // 2, 0, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, None)
-
         glBindTexture(GL_TEXTURE_2D, 0)
 
     def init_stream_texture(self):
@@ -276,7 +273,6 @@ class OpenGLRenderer:
         y_size = w * h
         u_size = w * h // 4
         v_size = u_size
-
         y_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=y_size)
         u_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=u_size, offset=y_size).reshape((h//2, w//2))
         v_plane = np.frombuffer(frame_yuv, dtype=np.uint8, count=v_size, offset=y_size+u_size).reshape((h//2, w//2))
@@ -285,7 +281,6 @@ class OpenGLRenderer:
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.y_tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_LUMINANCE, GL_UNSIGNED_BYTE, y_plane)
-
         glActiveTexture(GL_TEXTURE1)
         glBindTexture(GL_TEXTURE_2D, self.uv_tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w // 2, h // 2, GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE, uv_plane)        
@@ -293,7 +288,6 @@ class OpenGLRenderer:
         err = glGetError()
         if err != GL_NO_ERROR:
             print("OpenGL error:", err)
-
         self.draw_canvas()       
         glfw.swap_buffers(self.window)
 
@@ -303,7 +297,6 @@ class OpenGLRenderer:
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.rgb_tex)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.buffer_width, self.buffer_height, GL_RGBA, GL_UNSIGNED_BYTE, frame)
-
         self.draw_canvas()
         glfw.swap_buffers(self.window)
 
@@ -317,7 +310,6 @@ class OpenGLRenderer:
         glBindBuffer(GL_ARRAY_BUFFER, self.canvas_vertex_buffer)
         glBufferData(GL_ARRAY_BUFFER, _canvas_vertex_points.nbytes, _canvas_vertex_points, GL_STATIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
-
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self.canvas_element_buffer)
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, _canvas_vertex_indeces.nbytes, _canvas_vertex_indeces, GL_STATIC_DRAW)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
@@ -339,9 +331,7 @@ class OpenGLRenderer:
         texture_coordinates_attribute_index = 1
         glVertexAttribPointer(texture_coordinates_attribute_index, size, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(offset))
         glEnableVertexAttribArray(texture_coordinates_attribute_index)
-
-        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, None)
-
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_BYTE, None) # drawing canvas (fullscreen quad)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)
         glDisableVertexAttribArray(position_attribute_index)

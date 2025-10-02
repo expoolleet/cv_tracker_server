@@ -678,8 +678,11 @@ def close_server():
     camera_preview_process.join(timeout=join_timeout)
     camera_preview_process.terminate()        
 
-    frame_shared_memory_handler.close()
-    frame_shared_memory_handler.unlink()
+    try:
+        frame_shared_memory_handler.close()
+        frame_shared_memory_handler.unlink()
+    except FileNotFoundError:
+        pass
 
     if gpio_worker_thread:
         gpio_worker_thread.join(timeout=join_timeout) 
