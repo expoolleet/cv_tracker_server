@@ -1,7 +1,7 @@
 from picamera2 import Picamera2
 import libcamera
 
-def setup_camera(main: dict, lores: dict, fps: int, tranform : dict =None) -> Picamera2:
+def setup_camera(main: dict, lores: dict, fps: int, transform : dict=None) -> Picamera2:
     picam2 = Picamera2()
     mode = picam2.sensor_modes[0]
     print(f"Camera mode: {mode}")
@@ -10,8 +10,8 @@ def setup_camera(main: dict, lores: dict, fps: int, tranform : dict =None) -> Pi
         lores=lores, 
         controls={"FrameRate": fps},
         sensor={'output_size': mode['size'], 'bit_depth':mode['bit_depth']})
-    if tranform:
-        video_config["transform"] = libcamera.Transform(vflip=tranform["vflip"], hflip=tranform["hflip"])
+    if transform:
+        video_config["transform"] = libcamera.Transform(vflip=transform["vflip"], hflip=transform["hflip"])
     picam2.align_configuration(video_config)
     picam2.configure(video_config)
     return picam2
